@@ -1,0 +1,27 @@
+{
+  "appId": "com.deepseek.desktop",
+  "productName": "DeepSeek Desktop",
+  "artifactName": "DeepSeek-Desktop-${version}-${arch}.${ext}",
+  "asar": true,
+  "electronDist": "node_modules/electron/dist",
+  "npmRebuild": false,
+  "directories": { "buildResources": "build", "output": "release" },
+  "files": ["out/**", "package.json", "!out/**/*.map"],
+  "extraResources": [
+    { "from": "resources/dsh-runtime", "to": "dsh-runtime", "filter": ["**/*"] }
+  ],
+  "win": {
+    "target": [{ "target": "nsis", "arch": ["x64"] }],
+    "icon": "build/icon.ico",
+    "forceCodeSigning": false
+  },
+  "nsis": {
+    "oneClick": false,
+    "allowToChangeInstallationDirectory": true,
+    "createDesktopShortcut": true,
+    "createStartMenuShortcut": true,
+    "shortcutName": "DeepSeek Desktop",
+    "deleteAppDataOnUninstall": false
+  },
+  "publish": null
+}

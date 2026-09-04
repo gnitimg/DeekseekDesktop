@@ -1,0 +1,9 @@
+node_modules/
+out/
+release/
+*.tsbuildinfo
+.dsh-home/
+.artifacts/
+.codeartsdoer/
+.visual-check/
+resources/dsh-runtime/*.br

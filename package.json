@@ -1,0 +1,53 @@
+{
+  "name": "deepseek-desktop",
+  "version": "0.1.0",
+  "description": "DeepSeek Desktop: a native desktop application for the DeepSeek Harness agent, with a codex/zcode-style UI, full dsh core reuse, and a live plugin marketplace.",
+  "private": true,
+  "type": "module",
+  "main": "./out/main/index.js",
+  "license": "MIT",
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0"
+  },
+  "scripts": {
+    "postinstall": "node scripts/ensure-electron.mjs",
+    "predev": "node scripts/ensure-electron.mjs",
+    "dev": "electron-vite dev",
+    "prestart": "node scripts/ensure-electron.mjs",
+    "start": "electron-vite dev",
+    "build": "electron-vite build",
+    "preview": "electron-vite preview",
+    "typecheck": "tsc --noEmit -p tsconfig.node.json --composite false && tsc --noEmit -p tsconfig.web.json --composite false",
+    "runtime:sync": "node scripts/sync-dsh-runtime.mjs",
+    "pack:win": "npm run runtime:sync && npm run build && electron-builder --win --x64 --dir",
+    "dist:win": "npm run runtime:sync && npm run build && electron-builder --win nsis --x64"
+  },
+  "dependencies": {
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "pnpm": "10.33.0",
+    "ws": "^8.21.3",
+    "zustand": "^5.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@types/ws": "^8.18.1",
+    "@vitejs/plugin-react": "^5.0.0",
+    "autoprefixer": "^10.4.20",
+    "electron": "43.2.0",
+    "electron-builder": "26.15.3",
+    "electron-vite": "5.0.0",
+    "postcss": "^8.4.49",
+    "tailwindcss": "^3.4.17",
+    "typescript": "~5.9.3",
+    "vite": "^7.3.6"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild",
+      "electron"
+    ]
+  }
+}

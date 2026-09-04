@@ -1,0 +1,5 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": { "jsx": "react-jsx", "types": ["node"], "composite": true, "noEmit": false, "tsBuildInfoFile": "out/.tsbuildinfo-web" },
+  "include": ["src/renderer/src/**/*.ts", "src/renderer/src/**/*.tsx"]
+}
