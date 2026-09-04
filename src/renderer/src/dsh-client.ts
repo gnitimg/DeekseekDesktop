@@ -79,7 +79,7 @@ export const dsh = {
     rpc<SessionPromptValue>('session/prompt', { request }),
   cancel: (request: SessionCancelRequest): Promise<SessionCancelValue> =>
     rpc<SessionCancelValue>('session/cancel', { request }),
-  modelCatalog: (): Promise<ModelCatalog> => rpc<ModelCatalog>('session/modelCatalog', { _request: {} }),
+  modelCatalog: (): Promise<ModelCatalog> => rpc<ModelCatalog>('session/modelCatalog', {}),
   selectModel: (request: SessionSelectModelRequest): Promise<SessionSelectModelValue> =>
     rpc<SessionSelectModelValue>('session/selectModel', { request }),
   renameSession: (request: SessionRenameRequest): Promise<SessionRenameValue> =>
