@@ -1,4 +1,5 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { dsh } from '../dsh-client'
 import { PROJECT_PREFERENCES_KEY, useApp, type DesktopSession } from '../store'
 import type { View } from '../types'
@@ -113,6 +114,8 @@ export function Sidebar(): React.ReactElement {
   const [sessionRenamingId, setSessionRenamingId] = useState<string | undefined>()
   const [sessionRenameDraft, setSessionRenameDraft] = useState('')
   const [archiveConfirmId, setArchiveConfirmId] = useState<string | undefined>()
+  const [projectDialogOpen, setProjectDialogOpen] = useState(false)
+  const [projectKind, setProjectKind] = useState<'local' | 'remote'>('local')
   const searchRef = useRef<HTMLInputElement>(null)
   const projectMenuRef = useRef<HTMLDivElement>(null)
   const sessionMenuRef = useRef<HTMLDivElement>(null)
@@ -352,6 +355,11 @@ export function Sidebar(): React.ReactElement {
 
   async function createSession(cwd = workspaceRoot): Promise<void> {
     if (creating || dshUrl === undefined) return
+    if (cwd === undefined) {
+      setProjectKind('local')
+      setProjectDialogOpen(true)
+      return
+    }
     const reusable = sessions.find((session) => (
       session.blank && !session.running && (session.cwd ?? undefined) === (cwd ?? undefined)
     ))
@@ -369,7 +377,7 @@ export function Sidebar(): React.ReactElement {
     }
     try {
       const created = await dsh.createSession({
-        ...(cwd === undefined ? {} : { cwd }),
+        cwd,
         agentPreset,
       })
       addSession({
@@ -378,7 +386,7 @@ export function Sidebar(): React.ReactElement {
         updatedAt: Date.now(),
         running: false,
         blank: true,
-        ...(cwd === undefined ? {} : { cwd }),
+        cwd,
       })
     } catch (error) {
       setActionError(error instanceof Error ? error.message : String(error))
@@ -394,9 +402,29 @@ export function Sidebar(): React.ReactElement {
     await createSession(selected)
   }
 
+  async function continueProjectCreation(): Promise<void> {
+    if (projectKind === 'remote') {
+      localStorage.setItem('deepseek-desktop:settings-tab', 'connections')
+      setProjectDialogOpen(false)
+      setView('settings')
+      return
+    }
+    setProjectDialogOpen(false)
+    await chooseProject()
+  }
+
   useEffect(() => {
     if (searchOpen) searchRef.current?.focus()
   }, [searchOpen])
+
+  useEffect(() => {
+    if (!projectDialogOpen) return
+    const onEscape = (event: KeyboardEvent): void => {
+      if (event.key === 'Escape') setProjectDialogOpen(false)
+    }
+    window.addEventListener('keydown', onEscape)
+    return () => window.removeEventListener('keydown', onEscape)
+  }, [projectDialogOpen])
 
   useEffect(() => {
     localStorage.setItem(PROJECT_PREFERENCES_KEY, JSON.stringify(projectPreferences))
@@ -523,8 +551,8 @@ export function Sidebar(): React.ReactElement {
 
         <div className="projects-heading">
           <span>项目</span>
-          <button aria-label="打开项目" className="icon-button subtle" onClick={() => void chooseProject()} type="button">
-            <Icon name="folder" size={15} />
+          <button aria-label="创建项目" className="icon-button subtle project-create-trigger" onClick={() => setProjectDialogOpen(true)} type="button">
+            <Icon name="folder-plus" size={16} />
           </button>
         </div>
 
@@ -744,6 +772,34 @@ export function Sidebar(): React.ReactElement {
           <Icon name="settings" size={16} />
         </button>
       </div>
+
+      {projectDialogOpen && createPortal((
+        <div className="project-create-backdrop" onPointerDown={(event) => { if (event.target === event.currentTarget) setProjectDialogOpen(false) }}>
+          <section aria-labelledby="create-project-title" aria-modal="true" className="project-create-dialog" role="dialog">
+            <header>
+              <h2 id="create-project-title">创建项目</h2>
+              <button aria-label="关闭创建项目" onClick={() => setProjectDialogOpen(false)} type="button"><Icon name="close" size={17} /></button>
+            </header>
+            <span className="project-create-label">项目类型</span>
+            <div className="project-kind-grid">
+              <button className={projectKind === 'local' ? 'is-selected' : ''} onClick={() => setProjectKind('local')} type="button">
+                <Icon name="monitor" size={21} />
+                <i aria-hidden="true" />
+                <span><strong>本地</strong><small>在你的电脑上编辑、运行和测试文件</small></span>
+              </button>
+              <button className={projectKind === 'remote' ? 'is-selected' : ''} onClick={() => setProjectKind('remote')} type="button">
+                <Icon name="globe" size={21} />
+                <i aria-hidden="true" />
+                <span><strong>远程</strong><small>通过 SSH 选择已配置主机上的工作区</small></span>
+              </button>
+            </div>
+            {projectKind === 'remote' && <p className="project-create-note">下一步将在“连接”中添加或选择 SSH 主机。</p>}
+            <footer>
+              <button className="button button-primary" onClick={() => void continueProjectCreation()} type="button">{projectKind === 'local' ? '下一步' : '打开连接设置'}</button>
+            </footer>
+          </section>
+        </div>
+      ), document.body)}
     </aside>
   )
 }

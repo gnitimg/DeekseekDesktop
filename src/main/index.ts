@@ -18,6 +18,7 @@ let host: DshHostHandle | undefined
 let proxy: DshApiProxy | undefined
 let mainWindow: BrowserWindow | undefined
 let isQuitting = false
+let isRestartingHost = false
 
 function syncWindowChrome(): void {
   const dark = nativeTheme.shouldUseDarkColors
@@ -27,6 +28,39 @@ function syncWindowChrome(): void {
     symbolColor: dark ? '#e9e8e2' : '#292b29',
     height: 48,
   })
+}
+
+function observeHostExit(current: DshHostHandle): void {
+  current.child.on('exit', (code, signal) => {
+    if (isQuitting || isRestartingHost || current !== host) return
+    dialog.showErrorBox('DeepSeek Desktop', `The dsh host exited unexpectedly (code=${String(code)} signal=${String(signal)}). The application will close.`)
+    void shutdown()
+  })
+}
+
+async function restartDshHost(): Promise<string> {
+  isRestartingHost = true
+  const previousHost = host
+  proxy?.dispose()
+  proxy = undefined
+  host = undefined
+  await previousHost?.stop().catch(() => {})
+  try {
+    const nextHost = await startDshHost()
+    host = nextHost
+    try {
+      const nextProxy = await createDshApiProxy(nextHost.url, (frame) => { mainWindow?.webContents.send('dsh:stream:frame', frame) })
+      proxy = nextProxy
+      observeHostExit(nextHost)
+      return nextHost.url
+    } catch (error) {
+      host = undefined
+      await nextHost.stop().catch(() => {})
+      throw error
+    }
+  } finally {
+    isRestartingHost = false
+  }
 }
 
 /** Fetch the live plugin list from GitHub topic dsh-plugin (server-side, no CORS). */
@@ -49,19 +83,32 @@ function runGit(cwd: string, args: string[]): Promise<string> {
 async function readProjectEnvironment(path: string): Promise<unknown> {
   if (!existsSync(path) || !statSync(path).isDirectory()) throw new Error('项目目录不存在或不可读取')
   try {
-    const [branch, branchOutput, porcelain] = await Promise.all([
+    const [branch, branchOutput, porcelain, worktreeOutput] = await Promise.all([
       runGit(path, ['branch', '--show-current']),
       runGit(path, ['branch', '--format=%(refname:short)']),
       runGit(path, ['status', '--short', '--untracked-files=normal']),
+      runGit(path, ['worktree', 'list', '--porcelain']),
     ])
     const changes = porcelain === '' ? [] : porcelain.split(/\r?\n/).map((line) => ({
       status: line.slice(0, 2).trim() || '?',
       path: line.slice(3).trim(),
     }))
     const branches = branchOutput === '' ? [] : branchOutput.split(/\r?\n/).filter(Boolean)
-    return { path, isGit: true, branch: branch || 'HEAD', branches, changes }
+    const worktrees: Array<{ path: string, branch?: string, head?: string }> = []
+    let current: { path: string, branch?: string, head?: string } | undefined
+    for (const line of worktreeOutput.split(/\r?\n/)) {
+      if (line.startsWith('worktree ')) {
+        current = { path: line.slice(9) }
+        worktrees.push(current)
+      } else if (current !== undefined && line.startsWith('branch ')) {
+        current.branch = line.slice(7).replace(/^refs\/heads\//, '')
+      } else if (current !== undefined && line.startsWith('HEAD ')) {
+        current.head = line.slice(5, 12)
+      }
+    }
+    return { path, isGit: true, branch: branch || 'HEAD', branches, changes, worktrees }
   } catch {
-    return { path, isGit: false, branches: [], changes: [] }
+    return { path, isGit: false, branches: [], changes: [], worktrees: [] }
   }
 }
 
@@ -118,16 +165,12 @@ async function bootstrap(): Promise<void> {
     host = await startDshHost()
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
-    dialog.showErrorBox('DeepSeek Desktop', `Failed to start the dsh host.\n\n${message}\n\nBuild dsh first: in deepseek-harness-clean run "pnpm install && pnpm run build".`)
+    dialog.showErrorBox('DeepSeek Desktop', `Failed to start the dsh host.\n\n${message}\n\n请重新安装完整的 DeepSeek Desktop。`)
     app.quit()
     return
   }
 
-  host.child.on('exit', (code, signal) => {
-    if (isQuitting) return
-    dialog.showErrorBox('DeepSeek Desktop', `The dsh host exited unexpectedly (code=${String(code)} signal=${String(signal)}). The application will close.`)
-    void shutdown()
-  })
+  observeHostExit(host)
 
   try {
     proxy = await createDshApiProxy(host.url, (frame) => { mainWindow?.webContents.send('dsh:stream:frame', frame) })
@@ -145,7 +188,17 @@ async function bootstrap(): Promise<void> {
   ipcMain.handle('plugins:list', () => fetchPlugins())
   ipcMain.handle('plugins:install', (_event, spec: string) => installPlugin(spec))
   ipcMain.handle('settings:read', () => readDesktopEnv())
-  ipcMain.handle('settings:write', (_event, env: Record<string, string>) => { writeDesktopEnv(env) })
+  ipcMain.handle('settings:write', async (_event, env: Record<string, string>) => {
+    const previous = readDesktopEnv()
+    writeDesktopEnv(env)
+    try {
+      return await restartDshHost()
+    } catch (error) {
+      writeDesktopEnv(previous)
+      await restartDshHost().catch(() => {})
+      throw error
+    }
+  })
   ipcMain.handle('settings:appearance', (_event, appearance: string) => {
     if (appearance !== 'light' && appearance !== 'dark' && appearance !== 'system') return
     nativeTheme.themeSource = appearance

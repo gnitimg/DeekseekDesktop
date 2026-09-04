@@ -27,6 +27,7 @@ export interface ProjectEnvironment {
   branch?: string
   branches: string[]
   changes: Array<{ status: string, path: string }>
+  worktrees: Array<{ path: string, branch?: string, head?: string }>
 }
 
 /** dsh RPC result: ok union (never rejects). */
@@ -206,7 +207,7 @@ export interface DesktopApi {
   }
   settings: {
     read: () => Promise<Record<string, string>>
-    write: (env: Record<string, string>) => Promise<void>
+    write: (env: Record<string, string>) => Promise<string>
     appearance: (value: 'light' | 'dark' | 'system') => Promise<void>
   }
   project: {

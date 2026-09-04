@@ -46,7 +46,6 @@ function projectedModel(value: unknown): ModelSelection | undefined {
 export function App(): React.ReactElement {
   const view = useApp((state) => state.view)
   const replaceSessions = useApp((state) => state.replaceSessions)
-  const addSession = useApp((state) => state.addSession)
   const setConnection = useApp((state) => state.setConnection)
   const sidebarCollapsed = useApp((state) => state.sidebarCollapsed)
   const patchSession = useApp((state) => state.patchSession)
@@ -54,6 +53,7 @@ export function App(): React.ReactElement {
   const updateProjection = useApp((state) => state.updateProjection)
   const setControlJobs = useApp((state) => state.setControlJobs)
   const setControlError = useApp((state) => state.setControlError)
+  const connectionRevision = useApp((state) => state.connectionRevision)
   const appearance = useApp((state) => state.appearance)
 
   useEffect(() => {
@@ -113,15 +113,7 @@ export function App(): React.ReactElement {
           replaceSessions(sessions)
           return
         }
-        const created = await dsh.createSession({})
-        if (disposed) return
-        addSession({
-          id: created.sessionId,
-          title: '新任务',
-          updatedAt: Date.now(),
-          running: false,
-          blank: true,
-        })
+        replaceSessions([])
       } catch (error) {
         if (disposed) return
         setConnection(undefined, error instanceof Error ? error.message : String(error))
@@ -131,7 +123,7 @@ export function App(): React.ReactElement {
       disposed = true
       cancelControl?.()
     }
-  }, [addSession, patchSession, replaceSessions, setConnection, setControlBaseline, setControlError, setControlJobs, updateProjection])
+  }, [connectionRevision, patchSession, replaceSessions, setConnection, setControlBaseline, setControlError, setControlJobs, updateProjection])
 
   return (
     <div className={`app-shell ${sidebarCollapsed ? 'is-sidebar-collapsed' : ''}`}>
