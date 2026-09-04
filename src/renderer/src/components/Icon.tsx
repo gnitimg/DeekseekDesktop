@@ -1,9 +1,9 @@
 type IconName =
   | 'activity' | 'archive' | 'arrow-up' | 'branch' | 'cache' | 'check' | 'chevron-down'
   | 'chevron-left' | 'chevron-right' | 'clock' | 'close' | 'command' | 'copy' | 'external'
-  | 'edit' | 'folder' | 'grid' | 'layers' | 'menu' | 'more' | 'panel' | 'paperclip'
+  | 'edit' | 'folder' | 'folder-plus' | 'globe' | 'grid' | 'layers' | 'menu' | 'more' | 'panel' | 'paperclip'
   | 'pin' | 'plus' | 'refresh' | 'search' | 'settings' | 'shield' | 'sparkles'
-  | 'terminal' | 'trash' | 'user'
+  | 'terminal' | 'trash' | 'user' | 'keyboard' | 'link' | 'monitor'
 
 interface IconProps {
   name: IconName
@@ -29,9 +29,14 @@ const paths: Record<IconName, React.ReactNode> = {
   edit: <><path d="M4 20h4l11-11-4-4L4 16z" /><path d="m13.5 6.5 4 4" /></>,
   external: <><path d="M14 5h5v5M19 5l-8 8" /><path d="M17 13v6H5V7h6" /></>,
   folder: <path d="M3.5 7.5h6l2-2h9v13h-17z" />,
+  'folder-plus': <><path d="M3.5 7.5h6l2-2h9v13h-17z" /><path d="M12 11v5M9.5 13.5h5" /></>,
+  globe: <><circle cx="12" cy="12" r="9" /><path d="M3 12h18M12 3a15 15 0 0 1 0 18M12 3a15 15 0 0 0 0 18" /></>,
   grid: <><rect x="4" y="4" width="6" height="6" rx="1" /><rect x="14" y="4" width="6" height="6" rx="1" /><rect x="4" y="14" width="6" height="6" rx="1" /><rect x="14" y="14" width="6" height="6" rx="1" /></>,
+  keyboard: <><rect x="3" y="6" width="18" height="12" rx="2" /><path d="M7 10h.01M10 10h.01M13 10h.01M16 10h.01M7 14h7M17 14h.01" /></>,
   layers: <><path d="m12 3 9 5-9 5-9-5z" /><path d="m3 12 9 5 9-5M3 16l9 5 9-5" /></>,
+  link: <><path d="M10 13a5 5 0 0 0 7.1.1l2-2a5 5 0 0 0-7.1-7.1l-1.1 1.1" /><path d="M14 11a5 5 0 0 0-7.1-.1l-2 2A5 5 0 0 0 12 20l1.1-1.1" /></>,
   menu: <><path d="M5 8h14M5 12h14M5 16h14" /></>,
+  monitor: <><rect x="3" y="4" width="18" height="14" rx="2" /><path d="M8 21h8M12 18v3" /></>,
   more: <><circle cx="5" cy="12" r="1" fill="currentColor" stroke="none" /><circle cx="12" cy="12" r="1" fill="currentColor" stroke="none" /><circle cx="19" cy="12" r="1" fill="currentColor" stroke="none" /></>,
   panel: <><rect x="3" y="4" width="18" height="16" rx="2" /><path d="M15 4v16" /></>,
   paperclip: <path d="m8 12 5.8-5.8a3 3 0 0 1 4.2 4.2L9.4 19a5 5 0 0 1-7-7l8-8" />,

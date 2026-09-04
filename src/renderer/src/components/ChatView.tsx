@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { dsh } from '../dsh-client'
 import { useApp } from '../store'
 import type {
@@ -199,6 +199,8 @@ export function ChatView(): React.ReactElement {
   const [isStreaming, setIsStreaming] = useState(false)
   const [error, setError] = useState<string | undefined>()
   const [catalog, setCatalog] = useState<ModelCatalog | undefined>()
+  const [catalogLoading, setCatalogLoading] = useState(false)
+  const [catalogError, setCatalogError] = useState<string | undefined>()
   const [selectingModel, setSelectingModel] = useState(false)
   const [traceBySession, setTraceBySession] = useState<Record<string, TraceBlock[]>>({})
   const [attachments, setAttachments] = useState<ImageAttachment[]>([])
@@ -236,14 +238,20 @@ export function ChatView(): React.ReactElement {
   }, [attachments, messages])
   const projectPaths = useMemo(() => [...new Set(sessions.flatMap((session) => session.cwd === undefined ? [] : [session.cwd]))], [sessions])
 
-  useEffect(() => {
+  const loadModelCatalog = useCallback(async (): Promise<void> => {
     if (dshUrl === undefined) return
-    let disposed = false
-    void dsh.modelCatalog()
-      .then((value) => { if (!disposed) setCatalog(value) })
-      .catch(() => {})
-    return () => { disposed = true }
+    setCatalogLoading(true)
+    setCatalogError(undefined)
+    try {
+      setCatalog(await dsh.modelCatalog())
+    } catch (reason) {
+      setCatalogError(reason instanceof Error ? reason.message : String(reason))
+    } finally {
+      setCatalogLoading(false)
+    }
   }, [dshUrl])
+
+  useEffect(() => { void loadModelCatalog() }, [loadModelCatalog])
 
   useEffect(() => {
     cancelFollowRef.current?.()
@@ -347,7 +355,7 @@ export function ChatView(): React.ReactElement {
     setEnvironmentLoading(true)
     void window.desktop.project.environment(environmentPath)
       .then((value) => { if (!disposed) setEnvironment(value) })
-      .catch(() => { if (!disposed) setEnvironment({ path: environmentPath, isGit: false, branches: [], changes: [] }) })
+      .catch(() => { if (!disposed) setEnvironment({ path: environmentPath, isGit: false, branches: [], changes: [], worktrees: [] }) })
       .finally(() => { if (!disposed) setEnvironmentLoading(false) })
     return () => { disposed = true }
   }, [composerMenu, environmentPath, inspectorOpen])
@@ -662,8 +670,8 @@ export function ChatView(): React.ReactElement {
                         {message.streaming === true && <small className="working-label"><i />正在工作</small>}
                       </div>
                       {message.text === '' && message.streaming === true
-                        ? <div className="thinking-lines"><i /><i /><i /></div>
-                        : <p>{message.text}</p>}
+                        ? <div className="agent-thinking"><span aria-label="正在思考" className="agent-cursor" /></div>
+                        : <p>{message.text}{message.streaming === true && <span aria-label="正在生成" className="agent-cursor" />}</p>}
                     </div>
                   </article>
                 ))}
@@ -735,9 +743,12 @@ export function ChatView(): React.ReactElement {
                 </div>
                 <div className="composer-submit">
                   <div className="composer-menu-anchor model-menu-anchor">
-                    <button aria-expanded={composerMenu === 'model'} aria-haspopup="listbox" className={`composer-model-button ${composerMenu === 'model' ? 'is-open' : ''}`} disabled={selectingModel || availableModels.length === 0 || activeSessionId === undefined} onClick={() => setComposerMenu((current) => current === 'model' ? undefined : 'model')} type="button"><span>{selectedModelLabel}</span><Icon className="composer-chevron" name="chevron-down" size={13} /></button>
+                    <button aria-expanded={composerMenu === 'model'} aria-haspopup="listbox" className={`composer-model-button ${composerMenu === 'model' ? 'is-open' : ''}`} disabled={selectingModel || activeSessionId === undefined} onClick={() => { const opening = composerMenu !== 'model'; setComposerMenu(opening ? 'model' : undefined); if (opening) void loadModelCatalog() }} type="button"><span>{selectedModelLabel}</span><Icon className="composer-chevron" name="chevron-down" size={13} /></button>
                       <div aria-hidden={composerMenu !== 'model'} className={`composer-popover composer-model-popover ${composerMenu === 'model' ? 'is-open' : ''}`} role="listbox">
+                        {catalogLoading && <div className="composer-popover-state"><span className="mini-spinner" />正在读取模型目录…</div>}
+                        {!catalogLoading && catalogError !== undefined && <div className="composer-popover-state is-error"><span>{catalogError}</span><button onClick={() => void loadModelCatalog()} type="button">重试</button></div>}
                         {catalog?.groups.map((group) => <div className="composer-model-group" key={group.id}><span className="composer-popover-label">{group.name}</span>{group.models.map((model) => { const value = `${group.id}::${model.id}`; return <button aria-selected={value === modelValue} className={value === modelValue ? 'is-selected' : ''} key={model.id} onClick={() => { setComposerMenu(undefined); void selectModel(value) }} role="option" type="button"><span><strong>{model.name}</strong>{model.description !== undefined && <small>{model.description}</small>}</span>{value === modelValue && <Icon name="check" size={14} />}</button> })}</div>)}
+                        {!catalogLoading && catalogError === undefined && availableModels.length === 0 && <div className="composer-popover-state"><span>还没有可用模型</span><button onClick={() => { localStorage.setItem('deepseek-desktop:settings-tab', 'models'); setComposerMenu(undefined); setView('settings') }} type="button">配置模型</button></div>}
                       </div>
                   </div>
                   {isStreaming ? (

@@ -25,7 +25,7 @@ const api = {
   },
   settings: {
     read: (): Promise<Record<string, string>> => ipcRenderer.invoke('settings:read'),
-    write: (env: Record<string, string>): Promise<void> => ipcRenderer.invoke('settings:write', env),
+    write: (env: Record<string, string>): Promise<string> => ipcRenderer.invoke('settings:write', env),
     appearance: (value: 'light' | 'dark' | 'system'): Promise<void> => ipcRenderer.invoke('settings:appearance', value),
   },
   project: {

@@ -66,6 +66,8 @@ interface AppState {
   dshUrl: string | undefined
   connectionError: string | undefined
   setConnection: (url: string | undefined, error?: string) => void
+  connectionRevision: number
+  reconnectDsh: (url: string) => void
   sidebarCollapsed: boolean
   toggleSidebar: () => void
   inspectorOpen: boolean
@@ -153,6 +155,8 @@ export const useApp = create<AppState>((set) => ({
   dshUrl: undefined,
   connectionError: undefined,
   setConnection: (dshUrl, connectionError) => set({ dshUrl, connectionError }),
+  connectionRevision: 0,
+  reconnectDsh: (dshUrl) => set((state) => ({ dshUrl, connectionError: undefined, connectionRevision: state.connectionRevision + 1 })),
   sidebarCollapsed: false,
   toggleSidebar: () => set((state) => ({ sidebarCollapsed: !state.sidebarCollapsed })),
   inspectorOpen: false,
