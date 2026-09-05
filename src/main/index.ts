@@ -204,6 +204,13 @@ async function bootstrap(): Promise<void> {
     nativeTheme.themeSource = appearance
     syncWindowChrome()
   })
+  ipcMain.handle('models:fetch', async (_event, baseUrl: string, apiKey: string) => {
+    const url = `${baseUrl.replace(/\/+$/, '')}/models`
+    const response = await fetch(url, { headers: { Authorization: `Bearer ${apiKey}`, Accept: 'application/json' } })
+    if (!response.ok) throw new Error(`拉取模型失败：${String(response.status)} ${response.statusText}`)
+    const json = (await response.json()) as { data?: Array<{ id: string }> }
+    return json.data?.map((model) => model.id).filter((id) => id !== '') ?? []
+  })
   ipcMain.handle('project:choose-directory', async () => {
     if (mainWindow === undefined) return undefined
     const result = await dialog.showOpenDialog(mainWindow, {

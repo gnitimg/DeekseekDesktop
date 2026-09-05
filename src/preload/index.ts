@@ -36,6 +36,9 @@ const api = {
   attachments: {
     chooseImages: (): Promise<Array<{ name: string, mediaType: string, data: string }>> => ipcRenderer.invoke('attachments:choose-images'),
   },
+  models: {
+    fetch: (baseUrl: string, apiKey: string): Promise<string[]> => ipcRenderer.invoke('models:fetch', baseUrl, apiKey),
+  },
 }
 
 contextBridge.exposeInMainWorld('desktop', api)

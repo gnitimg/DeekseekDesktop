@@ -216,6 +216,7 @@ export interface DesktopApi {
     openTerminal: (path: string) => Promise<void>
   }
   attachments: { chooseImages: () => Promise<ImageAttachment[]> }
+  models: { fetch: (baseUrl: string, apiKey: string) => Promise<string[]> }
 }
 
 declare global {

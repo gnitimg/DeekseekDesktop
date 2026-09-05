@@ -1324,6 +1324,7 @@ select {
   right: 0;
   left: auto;
   width: 330px;
+  max-height: 248px;
   transform-origin: bottom right;
 }
 

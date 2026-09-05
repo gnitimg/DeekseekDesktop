@@ -94,6 +94,8 @@ export const dsh = {
     rpc<WorkspaceOrderValue>('workspace/insertBefore', { request }),
   archiveSession: (request: WorkspaceArchiveSessionRequest): Promise<WorkspaceArchiveValue> =>
     rpc<WorkspaceArchiveValue>('workspace/archiveSession', { request }),
+  updateDeepSeekModels: (models: unknown[]): Promise<unknown> =>
+    rpc<unknown>('settings/update', { ns: 'llm-deepseek', patch: { models }, expectedRevision: undefined }),
 
   /** Open a session/follow stream. Returns a cancel function. */
   follow: async (sessionId: string, handler: FrameHandler): Promise<() => void> => {

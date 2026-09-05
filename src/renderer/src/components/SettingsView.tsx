@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
+import { dsh } from '../dsh-client'
 import { useApp } from '../store'
 import type { ProjectEnvironment } from '../types'
 import { BrandMark, Icon } from './Icon'
@@ -108,6 +109,8 @@ export function SettingsView(): React.ReactElement {
   const [saved, setSaved] = useState(false)
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
+  const [fetching, setFetching] = useState(false)
+  const [fetchMessage, setFetchMessage] = useState<string | undefined>()
   const [error, setError] = useState<string | undefined>()
   const [environment, setEnvironment] = useState<ProjectEnvironment | undefined>()
   const [environmentLoading, setEnvironmentLoading] = useState(false)
@@ -183,6 +186,30 @@ export function SettingsView(): React.ReactElement {
       setError(reason instanceof Error ? reason.message : String(reason))
     } finally {
       setSaving(false)
+    }
+  }
+
+  async function fetchModels(): Promise<void> {
+    if (apiKey.trim() === '' || baseUrl.trim() === '') {
+      setError('请先填写 API Key 与 Base URL')
+      return
+    }
+    setFetching(true)
+    setError(undefined)
+    setFetchMessage(undefined)
+    try {
+      const ids = await window.desktop.models.fetch(baseUrl.trim(), apiKey.trim())
+      if (ids.length === 0) {
+        setError('该 URL 未返回任何模型')
+        return
+      }
+      const models = ids.map((id) => ({ id, name: id, contextWindow: 64000, maxTokens: 8192, inputModalities: ['text'] }))
+      await dsh.updateDeepSeekModels(models)
+      setFetchMessage(`已加载 ${String(ids.length)} 个模型，回到对话即可在下拉选择`)
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason))
+    } finally {
+      setFetching(false)
     }
   }
 
@@ -292,6 +319,8 @@ export function SettingsView(): React.ReactElement {
                   </label>
                   <div className="settings-card-actions">
                     {saved && <span className="saved-message"><Icon name="check" size={14} />已保存并应用</span>}
+                    {fetchMessage !== undefined && <span className="saved-message"><Icon name="check" size={14} />{fetchMessage}</span>}
+                    <button className="button" disabled={fetching || apiKey.trim() === '' || baseUrl.trim() === ''} onClick={() => void fetchModels()} type="button">{fetching ? '拉取中…' : '拉取可用模型'}</button>
                     <button className="button button-primary" disabled={loading || saving} onClick={() => void save()} type="button">{saving ? '保存中…' : '保存配置'}</button>
                   </div>
                 </div>
