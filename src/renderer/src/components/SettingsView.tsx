@@ -94,6 +94,15 @@ function resolvedAppearance(value: 'light' | 'dark' | 'system'): 'light' | 'dark
     : value
 }
 
+function comparableModelId(value: string): string {
+  return (value.split('/').at(-1) ?? value).toLowerCase().replace(/[^a-z0-9]+/gu, '')
+}
+
+function matchingModelId(ids: readonly string[], selected: string): string | undefined {
+  return ids.find((id) => id === selected)
+    ?? ids.find((id) => comparableModelId(id) === comparableModelId(selected))
+}
+
 export function SettingsView(): React.ReactElement {
   const setView = useApp((state) => state.setView)
   const workspaceRoot = useApp((state) => state.workspaceRoot)
@@ -102,6 +111,9 @@ export function SettingsView(): React.ReactElement {
   const appearance = useApp((state) => state.appearance)
   const setAppearance = useApp((state) => state.setAppearance)
   const reconnectDsh = useApp((state) => state.reconnectDsh)
+  const activeSessionId = useApp((state) => state.activeSessionId)
+  const sessions = useApp((state) => state.sessions)
+  const patchSession = useApp((state) => state.patchSession)
   const [tab, setTab] = useState<SettingsTab>(initialSettingsTab)
   const [apiKey, setApiKey] = useState('')
   const [baseUrl, setBaseUrl] = useState('')
@@ -205,7 +217,21 @@ export function SettingsView(): React.ReactElement {
       }
       const models = ids.map((id) => ({ id, name: id, contextWindow: 64000, maxTokens: 8192, inputModalities: ['text'] }))
       await dsh.updateDeepSeekModels(models)
-      setFetchMessage(`已加载 ${String(ids.length)} 个模型，回到对话即可在下拉选择`)
+      const catalog = await dsh.modelCatalog()
+      const activeSelection = sessions.find((session) => session.id === activeSessionId)?.selectedModel
+      const current = activeSelection ?? catalog.default
+      const matched = matchingModelId(ids, current.model)
+      if (activeSessionId !== undefined && current.provider === 'deepseek-official' && matched !== undefined && matched !== current.model) {
+        const accepted = await dsh.selectModel({
+          sessionId: activeSessionId,
+          provider: current.provider,
+          model: matched,
+        })
+        patchSession(activeSessionId, { selectedModel: accepted.selected })
+        setFetchMessage(`已加载 ${String(ids.length)} 个模型，并将当前模型匹配为 ${accepted.selected.model}`)
+      } else {
+        setFetchMessage(`已加载 ${String(ids.length)} 个模型，回到对话即可在下拉选择`)
+      }
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason))
     } finally {

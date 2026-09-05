@@ -14,8 +14,10 @@ interface Message {
   id: string
   role: 'user' | 'assistant'
   text: string
+  reasoning?: string
   streaming?: boolean
   optimistic?: boolean
+  failed?: boolean
   attachments?: Array<Pick<ImageAttachment, 'name' | 'mediaType'>>
 }
 
@@ -39,6 +41,33 @@ function contentText(value: unknown): string {
   if (typeof object.text === 'string') return object.text
   if (typeof object.content === 'string' || Array.isArray(object.content)) return contentText(object.content)
   return ''
+}
+
+interface AssistantContentParts {
+  text: string
+  reasoning: string
+}
+
+function assistantContent(value: unknown): AssistantContentParts {
+  if (typeof value === 'string') return { text: value, reasoning: '' }
+  if (Array.isArray(value)) {
+    return value.reduce<AssistantContentParts>((parts, item) => {
+      const next = assistantContent(item)
+      return {
+        text: [parts.text, next.text].filter(Boolean).join('\n\n'),
+        reasoning: [parts.reasoning, next.reasoning].filter(Boolean).join('\n\n'),
+      }
+    }, { text: '', reasoning: '' })
+  }
+  const object = asObject(value)
+  if (object === undefined) return { text: '', reasoning: '' }
+  const type = typeof object.type === 'string' ? object.type : ''
+  if (typeof object.text === 'string') {
+    if (type === 'reasoning' || type === 'thinking') return { text: '', reasoning: object.text }
+    if (type === '' || type === 'text' || type === 'output_text') return { text: object.text, reasoning: '' }
+  }
+  if (typeof object.content === 'string' || Array.isArray(object.content)) return assistantContent(object.content)
+  return { text: '', reasoning: '' }
 }
 
 function attachmentMeta(value: unknown): Array<Pick<ImageAttachment, 'name' | 'mediaType'>> {
@@ -66,16 +95,53 @@ function eventFromRecord(record: unknown): SessionEvent | undefined {
   }
 }
 
-function finishLastAssistant(messages: Message[], text?: string): Message[] {
+function finishLastAssistant(messages: Message[], text?: string, reasoning?: string): Message[] {
   const last = messages.at(-1)
   if (last?.role !== 'assistant') {
-    return text === undefined || text === '' ? messages : [...messages, { id: newId(), role: 'assistant', text }]
+    if ((text === undefined || text === '') && (reasoning === undefined || reasoning === '')) return messages
+    return [...messages, {
+      id: newId(),
+      role: 'assistant',
+      text: text ?? '',
+      ...(reasoning === undefined || reasoning === '' ? {} : { reasoning }),
+    }]
   }
   return [...messages.slice(0, -1), {
     ...last,
     text: text === undefined || text === '' ? last.text : text,
+    ...(reasoning === undefined || reasoning === '' ? {} : { reasoning }),
     streaming: false,
   }]
+}
+
+function turnFailureText(event: SessionEvent): string | undefined {
+  if (event.type !== 'turn/end') return undefined
+  const reason = asObject(asObject(event.data)?.reason)
+  if (reason?.kind !== 'error') return undefined
+  const error = asObject(reason.error)
+  const message = typeof error?.message === 'string' && error.message.trim() !== ''
+    ? error.message.trim()
+    : '模型请求失败'
+  const code = typeof error?.code === 'string' && !message.includes(error.code)
+    ? `（${error.code}）`
+    : ''
+  const status = typeof error?.status === 'number' ? error.status : undefined
+  const hint = status === 400 ? '。请检查 Base URL 与所选模型是否匹配。' : ''
+  return `请求失败：${message}${code}${hint}`
+}
+
+function failLastAssistant(messages: Message[], event: SessionEvent, text: string): Message[] {
+  const last = messages.at(-1)
+  const failure: Message = {
+    id: `failure-${String(event.seq)}`,
+    role: 'assistant',
+    text,
+    streaming: false,
+    failed: true,
+  }
+  if (last?.role !== 'assistant') return [...messages, failure]
+  if (last.text === '') return [...messages.slice(0, -1), { ...last, text, streaming: false, failed: true }]
+  return [...finishLastAssistant(messages), failure]
 }
 
 function applyEvent(messages: Message[], event: SessionEvent): Message[] {
@@ -94,16 +160,28 @@ function applyEvent(messages: Message[], event: SessionEvent): Message[] {
   }
   if (event.type === 'assistant/chunk') {
     const chunk = asObject(data?.chunk)
-    if (chunk?.type !== 'text-delta' || typeof chunk.text !== 'string') return messages
+    if ((chunk?.type !== 'text-delta' && chunk?.type !== 'reasoning-delta') || typeof chunk.text !== 'string') return messages
+    const isReasoning = chunk.type === 'reasoning-delta'
     const last = messages.at(-1)
     if (last?.role === 'assistant' && last.streaming === true) {
-      return [...messages.slice(0, -1), { ...last, text: last.text + chunk.text }]
+      return [...messages.slice(0, -1), {
+        ...last,
+        text: isReasoning ? last.text : last.text + chunk.text,
+        ...(isReasoning ? { reasoning: (last.reasoning ?? '') + chunk.text } : {}),
+      }]
     }
-    return [...messages, { id: `assistant-${event.seq}`, role: 'assistant', text: chunk.text, streaming: true }]
+    return [...messages, {
+      id: `assistant-${event.seq}`,
+      role: 'assistant',
+      text: isReasoning ? '' : chunk.text,
+      ...(isReasoning ? { reasoning: chunk.text } : {}),
+      streaming: true,
+    }]
   }
   if (event.type === 'assistant/message') {
     const message = asObject(data?.message)
-    return finishLastAssistant(messages, contentText(message?.content))
+    const content = assistantContent(message?.content)
+    return finishLastAssistant(messages, content.text, content.reasoning)
   }
   if (event.type === 'assistant/text') {
     const text = contentText(event.data)
@@ -113,7 +191,11 @@ function applyEvent(messages: Message[], event: SessionEvent): Message[] {
     }
     return text === '' ? messages : [...messages, { id: `assistant-${event.seq}`, role: 'assistant', text, streaming: true }]
   }
-  if (event.type === 'turn/end' || event.type === 'turn/cancel') return finishLastAssistant(messages)
+  if (event.type === 'turn/end') {
+    const failure = turnFailureText(event)
+    return failure === undefined ? finishLastAssistant(messages) : failLastAssistant(messages, event, failure)
+  }
+  if (event.type === 'turn/cancel') return finishLastAssistant(messages)
   return messages
 }
 
@@ -139,6 +221,51 @@ function pathName(path: string | undefined): string {
   return path.replace(/[\\/]+$/, '').split(/[\\/]/).at(-1) ?? path
 }
 
+function comparableModelId(value: string): string {
+  return (value.split('/').at(-1) ?? value).toLowerCase().replace(/[^a-z0-9]+/gu, '')
+}
+
+function matchingModelId(ids: readonly string[], selected: string): string | undefined {
+  return ids.find((id) => id === selected)
+    ?? ids.find((id) => comparableModelId(id) === comparableModelId(selected))
+}
+
+const modelProviderNames: Readonly<Record<string, string>> = {
+  qwen: 'Qwen',
+  'deepseek-ai': 'DeepSeek',
+  baai: 'BAAI',
+  'zai-org': 'Z.ai',
+  xingchenagi: 'XingChen AGI',
+  thudm: 'THUDM',
+  moonshotai: 'Moonshot AI',
+  funaudiollm: 'FunAudioLLM',
+  inclusionai: 'Inclusion AI',
+  'wan-ai': 'Wan AI',
+  'tongyi-mai': 'Tongyi MAI',
+  minimaxai: 'MiniMax',
+  tencent: 'Tencent',
+  'stepfun-ai': 'StepFun',
+  paddlepaddle: 'PaddlePaddle',
+  'bytedance-seed': 'ByteDance Seed',
+  'nex-agi': 'Nex AGI',
+  'meituan-longcat': 'Meituan LongCat',
+  'kwai-kolors': 'Kwai Kolors',
+  baidu: 'Baidu',
+  fnlp: 'FNLP',
+}
+const modelRoutePrefixes: ReadonlySet<string> = new Set(['pro', 'lora', 'free'])
+
+function modelProviderName(modelId: string, fallback: string): string {
+  const segments = modelId.split('/').filter(Boolean)
+  if (segments.length < 2) return fallback
+  const first = segments[0]
+  const namespace = first !== undefined && modelRoutePrefixes.has(first.toLowerCase())
+    ? segments[1]
+    : first
+  if (namespace === undefined) return fallback
+  return modelProviderNames[namespace.toLowerCase()] ?? namespace
+}
+
 function tokenUsageOf(value: unknown): TokenUsageProjection | undefined {
   const item = asObject(value)
   if (item === undefined) return undefined
@@ -153,6 +280,143 @@ function statsOf(value: unknown): SessionStatsProjection | undefined {
   const keys = ['turns', 'steps', 'llmMs', 'toolMs', 'ttftMs', 'ttftSteps', 'decodeMs', 'decodeTokens'] as const
   if (!keys.every((key) => typeof item[key] === 'number')) return undefined
   return Object.fromEntries(keys.map((key) => [key, item[key]])) as unknown as SessionStatsProjection
+}
+
+interface SessionMetricFold {
+  stats: SessionStatsProjection
+  tokenUsage: TokenUsageProjection
+  lastTurn?: number
+  openStep?: { turn: number, step: number, startTime: number, firstTokenTime?: number }
+  pendingCalls: Record<string, number>
+  lastUsage?: { turn: number, step: number, buckets: TokenUsageProjection }
+}
+
+function emptySessionMetricFold(): SessionMetricFold {
+  return {
+    stats: { turns: 0, steps: 0, llmMs: 0, toolMs: 0, ttftMs: 0, ttftSteps: 0, decodeMs: 0, decodeTokens: 0 },
+    tokenUsage: { uncachedInputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 },
+    pendingCalls: {},
+  }
+}
+
+function finiteNumber(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined
+}
+
+function eventTime(value: SessionEvent['time']): number | undefined {
+  const parsed = typeof value === 'number' ? value : Date.parse(value)
+  return Number.isFinite(parsed) ? parsed : undefined
+}
+
+function usageBuckets(value: unknown): TokenUsageProjection | undefined {
+  const usage = asObject(value)
+  const inputTokens = finiteNumber(usage?.inputTokens)
+  const outputTokens = finiteNumber(usage?.outputTokens)
+  if (inputTokens === undefined || outputTokens === undefined || inputTokens < 0 || outputTokens < 0) return undefined
+  return {
+    uncachedInputTokens: inputTokens,
+    outputTokens,
+    cacheReadTokens: Math.max(0, finiteNumber(usage?.cacheReadTokens) ?? 0),
+    cacheWriteTokens: Math.max(0, finiteNumber(usage?.cacheWriteTokens) ?? 0),
+  }
+}
+
+function foldSessionMetric(state: SessionMetricFold, event: SessionEvent): SessionMetricFold {
+  const data = asObject(event.data)
+  const turn = finiteNumber(data?.turn)
+  const step = finiteNumber(data?.step)
+  const time = eventTime(event.time)
+  const chunk = asObject(data?.chunk)
+  let next = state
+
+  if (event.type === 'llm/retry-started' && turn !== undefined && step !== undefined
+    && state.lastUsage?.turn === turn && state.lastUsage.step === step) {
+    next = { ...state, lastUsage: undefined }
+  }
+
+  const usage = event.type === 'assistant/chunk' && chunk?.type === 'usage'
+    ? usageBuckets(chunk.usage)
+    : event.type === 'assistant/message' ? usageBuckets(data?.usage) : undefined
+  if (usage !== undefined && turn !== undefined && step !== undefined) {
+    const previous = next.lastUsage?.turn === turn && next.lastUsage.step === step
+      ? next.lastUsage.buckets
+      : undefined
+    next = {
+      ...next,
+      tokenUsage: {
+        uncachedInputTokens: next.tokenUsage.uncachedInputTokens - (previous?.uncachedInputTokens ?? 0) + usage.uncachedInputTokens,
+        outputTokens: next.tokenUsage.outputTokens - (previous?.outputTokens ?? 0) + usage.outputTokens,
+        cacheReadTokens: next.tokenUsage.cacheReadTokens - (previous?.cacheReadTokens ?? 0) + usage.cacheReadTokens,
+        cacheWriteTokens: next.tokenUsage.cacheWriteTokens - (previous?.cacheWriteTokens ?? 0) + usage.cacheWriteTokens,
+      },
+      lastUsage: { turn, step, buckets: usage },
+    }
+  }
+
+  if (event.type === 'step/start' && turn !== undefined && step !== undefined && time !== undefined) {
+    return { ...next, openStep: { turn, step, startTime: time } }
+  }
+  if (event.type === 'assistant/chunk') {
+    const open = next.openStep
+    const isToken = (chunk?.type === 'reasoning-delta' || chunk?.type === 'text-delta')
+      && typeof chunk.text === 'string' && chunk.text !== ''
+    if (open === undefined || open.firstTokenTime !== undefined || !isToken || time === undefined
+      || turn !== open.turn || step !== open.step) return next
+    return { ...next, openStep: { ...open, firstTokenTime: time } }
+  }
+  if (event.type === 'assistant/message') {
+    const open = next.openStep
+    if (open === undefined || time === undefined || turn !== open.turn || step !== open.step) return next
+    const stats = { ...next.stats, llmMs: next.stats.llmMs + Math.max(0, time - open.startTime) }
+    if (open.firstTokenTime !== undefined) {
+      stats.ttftMs += Math.max(0, open.firstTokenTime - open.startTime)
+      stats.ttftSteps += 1
+      const outputTokens = finiteNumber(asObject(data?.usage)?.outputTokens)
+      if (outputTokens !== undefined && outputTokens >= 0) {
+        stats.decodeMs += Math.max(0, time - open.firstTokenTime)
+        stats.decodeTokens += outputTokens
+      }
+    }
+    return { ...next, stats, openStep: undefined }
+  }
+  if (event.type === 'tool/call' && typeof data?.callId === 'string' && time !== undefined) {
+    return { ...next, pendingCalls: { ...next.pendingCalls, [data.callId]: time } }
+  }
+  if (event.type === 'tool/result' && time !== undefined) {
+    const callId = asObject(asObject(data?.message)?.source)?.callId
+    if (typeof callId !== 'string' || !Object.hasOwn(next.pendingCalls, callId)) return next
+    const dispatched = next.pendingCalls[callId]
+    if (dispatched === undefined) return next
+    const pendingCalls = Object.fromEntries(Object.entries(next.pendingCalls).filter(([id]) => id !== callId))
+    return {
+      ...next,
+      stats: { ...next.stats, toolMs: next.stats.toolMs + Math.max(0, time - dispatched) },
+      pendingCalls,
+    }
+  }
+  if (event.type === 'step/end' && turn !== undefined) {
+    return {
+      ...next,
+      stats: {
+        ...next.stats,
+        turns: next.lastTurn === turn ? next.stats.turns : next.stats.turns + 1,
+        steps: next.stats.steps + 1,
+      },
+      lastTurn: turn,
+      openStep: undefined,
+    }
+  }
+  if (event.type === 'turn/end' && Object.keys(next.pendingCalls).length > 0) {
+    return { ...next, pendingCalls: {} }
+  }
+  return next
+}
+
+function metricsFrom(records: unknown[]): SessionMetricFold {
+  return records.reduce<SessionMetricFold>((state, record) => {
+    const event = eventFromRecord(record)
+    return event === undefined ? state : foldSessionMetric(state, event)
+  }, emptySessionMetricFold())
 }
 
 function pressureOf(value: unknown): ContextPressureProjection | undefined {
@@ -171,6 +435,24 @@ function compactDuration(ms: number): string {
   if (ms < 60_000) return `${String(Math.round(ms / 100) / 10)}s`
   const seconds = Math.round(ms / 1_000)
   return `${String(Math.floor(seconds / 60))}m ${String(seconds % 60)}s`
+}
+
+function metricDuration(ms: number): string {
+  const safeMs = Math.max(0, ms)
+  if (safeMs < 60_000) return `${String(Math.round(safeMs / 100) / 10)}秒`
+  const seconds = Math.round(safeMs / 1_000)
+  return `${String(Math.floor(seconds / 60))}分${String(seconds % 60)}秒`
+}
+
+function averageFirstTokenDuration(ms: number): string {
+  return `${String(Math.round(Math.max(0, ms) / 100) / 10)}秒`
+}
+
+function compactTokenCount(tokens: number): string {
+  const safeTokens = Math.max(0, tokens)
+  if (safeTokens >= 1_000_000) return `${String(Math.round(safeTokens / 100_000) / 10)}M tok`
+  if (safeTokens >= 1_000) return `${String(Math.round(safeTokens / 100) / 10)}K tok`
+  return `${String(Math.round(safeTokens))} tok`
 }
 
 export function ChatView(): React.ReactElement {
@@ -195,8 +477,11 @@ export function ChatView(): React.ReactElement {
   const controlJobs = useApp((state) => state.controlJobs)
   const activeSession = sessions.find((session) => session.id === activeSessionId)
   const [messagesBySession, setMessagesBySession] = useState<Record<string, Message[]>>({})
+  const [metricFoldsBySession, setMetricFoldsBySession] = useState<Record<string, SessionMetricFold>>({})
   const [input, setInput] = useState('')
   const [isStreaming, setIsStreaming] = useState(false)
+  const [isCancelling, setIsCancelling] = useState(false)
+  const [copiedMessageId, setCopiedMessageId] = useState<string | undefined>()
   const [error, setError] = useState<string | undefined>()
   const [catalog, setCatalog] = useState<ModelCatalog | undefined>()
   const [catalogLoading, setCatalogLoading] = useState(false)
@@ -217,9 +502,10 @@ export function ChatView(): React.ReactElement {
   const taskMenuRef = useRef<HTMLDivElement>(null)
   const composerRef = useRef<HTMLDivElement>(null)
   const messages = activeSessionId === undefined ? [] : messagesBySession[activeSessionId] ?? []
+  const fallbackMetrics = activeSessionId === undefined ? undefined : metricFoldsBySession[activeSessionId]
   const projectionValues = activeSessionId === undefined ? undefined : projectionBaselines[activeSessionId]?.values
-  const tokenUsage = tokenUsageOf(projectionValues?.tokenUsage)
-  const stats = statsOf(projectionValues?.sessionStats)
+  const tokenUsage = tokenUsageOf(projectionValues?.tokenUsage) ?? fallbackMetrics?.tokenUsage
+  const stats = statsOf(projectionValues?.sessionStats) ?? fallbackMetrics?.stats
   const pressure = pressureOf(projectionValues?.contextPressure)
   const activeJobs = activeSessionId === undefined ? [] : controlJobs[activeSessionId] ?? []
   const billedInput = tokenUsage === undefined ? 0 : tokenUsage.uncachedInputTokens + tokenUsage.cacheReadTokens + tokenUsage.cacheWriteTokens
@@ -228,6 +514,19 @@ export function ChatView(): React.ReactElement {
   const contextPercent = contextUsed === undefined || pressure?.contextWindow === undefined || pressure.contextWindow <= 0
     ? undefined
     : Math.min(100, Math.round(contextUsed / pressure.contextWindow * 100))
+  const averageFirstToken = stats === undefined || stats.ttftSteps <= 0
+    ? undefined
+    : stats.ttftMs / stats.ttftSteps
+  const decodeRate = stats === undefined || stats.decodeMs <= 0
+    ? undefined
+    : Math.round(stats.decodeTokens / stats.decodeMs * 1_000)
+  const runtimeSummary = [
+    `${String(stats?.turns ?? 0)} 轮 · ${String(stats?.steps ?? 0)} 步`,
+    `LLM ${stats === undefined ? '—' : metricDuration(stats.llmMs)} · 工具调用 ${stats === undefined ? '—' : metricDuration(stats.toolMs)}`,
+    `首 token 平均 ${averageFirstToken === undefined ? '—' : averageFirstTokenDuration(averageFirstToken)} · ${decodeRate === undefined ? '— tok/s' : `${String(decodeRate)} tok/s`}`,
+    `缓存命中 ${cacheHit === undefined ? '—' : `${String(cacheHit)}%`}`,
+    `输入 ${tokenUsage === undefined ? '— tok' : compactTokenCount(billedInput)} · 输出 ${tokenUsage === undefined ? '— tok' : compactTokenCount(tokenUsage.outputTokens)}`,
+  ]
   const environmentPath = activeSession?.cwd ?? workspaceRoot
   const sourceItems = useMemo(() => {
     const names = [
@@ -238,12 +537,48 @@ export function ChatView(): React.ReactElement {
   }, [attachments, messages])
   const projectPaths = useMemo(() => [...new Set(sessions.flatMap((session) => session.cwd === undefined ? [] : [session.cwd]))], [sessions])
 
-  const loadModelCatalog = useCallback(async (): Promise<void> => {
+  const loadModelCatalog = useCallback(async (refreshRemote = false): Promise<void> => {
     if (dshUrl === undefined) return
     setCatalogLoading(true)
     setCatalogError(undefined)
     try {
-      setCatalog(await dsh.modelCatalog())
+      let remoteIds: string[] | undefined
+      if (refreshRemote) {
+        const env = await window.desktop.settings.read()
+        const apiKey = env.DEEPSEEK_API_KEY?.trim()
+        const baseUrl = env.DEEPSEEK_BASE_URL?.trim()
+        if (apiKey !== undefined && apiKey !== '' && baseUrl !== undefined && baseUrl !== '') {
+          remoteIds = await window.desktop.models.fetch(baseUrl, apiKey)
+          if (remoteIds.length === 0) throw new Error('当前 Base URL 没有返回可用模型')
+          await dsh.updateDeepSeekModels(remoteIds.map((id) => ({
+            id,
+            name: id,
+            contextWindow: 64000,
+            maxTokens: 8192,
+            inputModalities: ['text'],
+          })))
+        }
+      }
+      let nextCatalog = await dsh.modelCatalog()
+      if (remoteIds !== undefined) {
+        const appState = useApp.getState()
+        const sessionId = appState.activeSessionId
+        const activeSelection = appState.sessions.find((session) => session.id === sessionId)?.selectedModel
+        const current = activeSelection ?? nextCatalog.default
+        const matched = current.provider === 'deepseek-official'
+          ? matchingModelId(remoteIds, current.model)
+          : undefined
+        if (sessionId !== undefined && matched !== undefined && matched !== current.model) {
+          const accepted = await dsh.selectModel({
+            sessionId,
+            provider: current.provider,
+            model: matched,
+          })
+          appState.patchSession(sessionId, { selectedModel: accepted.selected })
+          nextCatalog = await dsh.modelCatalog()
+        }
+      }
+      setCatalog(nextCatalog)
     } catch (reason) {
       setCatalogError(reason instanceof Error ? reason.message : String(reason))
     } finally {
@@ -264,10 +599,15 @@ export function ChatView(): React.ReactElement {
       if (disposed) return
       if (frame.type === 'snapshot') {
         setMessagesBySession((current) => ({ ...current, [activeSessionId]: historyFrom(frame.records) }))
+        setMetricFoldsBySession((current) => ({ ...current, [activeSessionId]: metricsFrom(frame.records) }))
         setTraceBySession((current) => ({ ...current, [activeSessionId]: traceFromRecords(frame.records) }))
         return
       }
       const event = (frame as SessionFollowEvent).event
+      setMetricFoldsBySession((current) => ({
+        ...current,
+        [activeSessionId]: foldSessionMetric(current[activeSessionId] ?? emptySessionMetricFold(), event),
+      }))
       const trace = traceFromEvent(event)
       if (trace !== undefined) {
         setTraceBySession((current) => {
@@ -388,10 +728,11 @@ export function ChatView(): React.ReactElement {
     group.models.map((model) => ({
       value: `${group.id}::${model.id}`,
       label: model.name,
-      provider: group.name,
+      provider: modelProviderName(model.id, group.name),
     }))
   )) ?? [], [catalog])
   const selectedModelLabel = availableModels.find((model) => model.value === modelValue)?.label ?? selectedModel?.model ?? '加载模型…'
+  const lastUserMessageId = [...messages].reverse().find((message) => message.role === 'user')?.id
 
   async function switchProject(path: string): Promise<void> {
     const reusable = sessions.find((session) => session.cwd === path && session.blank && !session.running)
@@ -500,12 +841,53 @@ export function ChatView(): React.ReactElement {
     }
   }
 
-  async function cancel(): Promise<void> {
-    if (activeSessionId === undefined) return
+  async function cancel(): Promise<boolean> {
+    if (activeSessionId === undefined || isCancelling) return false
+    setIsCancelling(true)
+    setError(undefined)
     try {
       await dsh.cancel({ sessionId: activeSessionId })
-    } catch {
-      // The follow stream remains the source of truth if cancellation races completion.
+      setIsStreaming(false)
+      patchSession(activeSessionId, { running: false, updatedAt: Date.now() })
+      setMessagesBySession((current) => {
+        const items = finishLastAssistant(current[activeSessionId] ?? [])
+        const last = items.at(-1)
+        return {
+          ...current,
+          [activeSessionId]: last?.role === 'assistant' && last.text === '' ? items.slice(0, -1) : items,
+        }
+      })
+      return true
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason))
+      return false
+    } finally {
+      setIsCancelling(false)
+    }
+  }
+
+  async function editMessage(message: Message): Promise<void> {
+    if (message.text === '') return
+    if (isStreaming) await cancel()
+    setInput(message.text)
+    requestAnimationFrame(() => {
+      const textarea = textareaRef.current
+      if (textarea === null) return
+      textarea.focus()
+      textarea.setSelectionRange(textarea.value.length, textarea.value.length)
+      textarea.style.height = 'auto'
+      textarea.style.height = `${Math.min(textarea.scrollHeight, 180)}px`
+    })
+  }
+
+  async function copyMessage(message: Message): Promise<void> {
+    if (message.text === '') return
+    try {
+      await navigator.clipboard.writeText(message.text)
+      setCopiedMessageId(message.id)
+      window.setTimeout(() => setCopiedMessageId((current) => current === message.id ? undefined : current), 1_500)
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason))
     }
   }
 
@@ -659,18 +1041,35 @@ export function ChatView(): React.ReactElement {
               <div className="message-list">
                 {messages.map((message) => message.role === 'user' ? (
                   <article className="message-user" key={message.id}>
-                    <div><div className="message-meta"><span>你</span>{message.optimistic === true && <small>发送中</small>}</div>{message.attachments !== undefined && <div className="message-attachments">{message.attachments.map((item, index) => <span key={`${item.name}-${String(index)}`}><Icon name="paperclip" size={12} />{item.name}</span>)}</div>}{message.text !== '' && <p>{message.text}</p>}</div>
+                    <div>
+                      <div className="message-user-heading">
+                        <div className="message-meta"><span>你</span>{message.optimistic === true && <small>发送中</small>}</div>
+                        <div className="message-actions">
+                          <button aria-label="复制消息" disabled={message.text === ''} onClick={() => void copyMessage(message)} title="复制" type="button"><Icon name={copiedMessageId === message.id ? 'check' : 'copy'} size={13} /></button>
+                          <button aria-label="修改并重新发送" disabled={message.text === ''} onClick={() => void editMessage(message)} title="修改并重新发送" type="button"><Icon name="edit" size={13} /></button>
+                          {isStreaming && message.id === lastUserMessageId && <button aria-label="强制停止当前任务" className="is-danger" disabled={isCancelling} onClick={() => void cancel()} title="强制停止" type="button"><span className="stop-glyph" /></button>}
+                        </div>
+                      </div>
+                      {message.attachments !== undefined && <div className="message-attachments">{message.attachments.map((item, index) => <span key={`${item.name}-${String(index)}`}><Icon name="paperclip" size={12} />{item.name}</span>)}</div>}
+                      {message.text !== '' && <p>{message.text}</p>}
+                    </div>
                   </article>
                 ) : (
-                  <article className="message-assistant" key={message.id}>
+                  <article className={`message-assistant ${message.failed === true ? 'is-failed' : ''}`} key={message.id}>
                     <div className="assistant-rail"><BrandMark size={24} /></div>
                     <div className="assistant-content">
                       <div className="message-meta">
                         <span>DeepSeek</span>
                         {message.streaming === true && <small className="working-label"><i />正在工作</small>}
                       </div>
+                      {message.reasoning !== undefined && message.reasoning !== '' && (
+                        <details className="reasoning-disclosure">
+                          <summary><span>思考中</span><span aria-hidden="true" className="reasoning-caret">&gt;</span></summary>
+                          <div className="reasoning-body">{message.reasoning}</div>
+                        </details>
+                      )}
                       {message.text === '' && message.streaming === true
-                        ? <div className="agent-thinking"><span aria-label="正在思考" className="agent-cursor" /></div>
+                        ? message.reasoning === undefined || message.reasoning === '' ? <div className="agent-thinking"><span aria-label="正在思考" className="agent-cursor" /></div> : null
                         : <p>{message.text}{message.streaming === true && <span aria-label="正在生成" className="agent-cursor" />}</p>}
                     </div>
                   </article>
@@ -743,16 +1142,21 @@ export function ChatView(): React.ReactElement {
                 </div>
                 <div className="composer-submit">
                   <div className="composer-menu-anchor model-menu-anchor">
-                    <button aria-expanded={composerMenu === 'model'} aria-haspopup="listbox" className={`composer-model-button ${composerMenu === 'model' ? 'is-open' : ''}`} disabled={selectingModel || activeSessionId === undefined} onClick={() => { const opening = composerMenu !== 'model'; setComposerMenu(opening ? 'model' : undefined); if (opening) void loadModelCatalog() }} type="button"><span>{selectedModelLabel}</span><Icon className="composer-chevron" name="chevron-down" size={13} /></button>
+                    <button aria-expanded={composerMenu === 'model'} aria-haspopup="listbox" className={`composer-model-button ${composerMenu === 'model' ? 'is-open' : ''}`} disabled={selectingModel || activeSessionId === undefined} onClick={() => { const opening = composerMenu !== 'model'; setComposerMenu(opening ? 'model' : undefined); if (opening) void loadModelCatalog(true) }} type="button"><span>{selectedModelLabel}</span><Icon className="composer-chevron" name="chevron-down" size={13} /></button>
                       <div aria-hidden={composerMenu !== 'model'} className={`composer-popover composer-model-popover ${composerMenu === 'model' ? 'is-open' : ''}`} role="listbox">
                         {catalogLoading && <div className="composer-popover-state"><span className="mini-spinner" />正在读取模型目录…</div>}
-                        {!catalogLoading && catalogError !== undefined && <div className="composer-popover-state is-error"><span>{catalogError}</span><button onClick={() => void loadModelCatalog()} type="button">重试</button></div>}
-                        {catalog?.groups.map((group) => <div className="composer-model-group" key={group.id}><span className="composer-popover-label">{group.name}</span>{group.models.map((model) => { const value = `${group.id}::${model.id}`; return <button aria-selected={value === modelValue} className={value === modelValue ? 'is-selected' : ''} key={model.id} onClick={() => { setComposerMenu(undefined); void selectModel(value) }} role="option" type="button"><span><strong>{model.name}</strong>{model.description !== undefined && <small>{model.description}</small>}</span>{value === modelValue && <Icon name="check" size={14} />}</button> })}</div>)}
+                        {!catalogLoading && catalogError !== undefined && <div className="composer-popover-state is-error"><span>{catalogError}</span><button onClick={() => void loadModelCatalog(true)} type="button">重试</button></div>}
+                        {!catalogLoading && catalogError === undefined && availableModels.length > 0 && <>
+                          <span className="composer-popover-label">当前 Base URL · {availableModels.length} 个模型</span>
+                          <div className="composer-model-list">
+                            {availableModels.map((model) => <button aria-selected={model.value === modelValue} className={model.value === modelValue ? 'is-selected' : ''} key={model.value} onClick={() => { setComposerMenu(undefined); void selectModel(model.value) }} role="option" type="button"><span><strong>{model.label}</strong><small>{model.provider}</small></span>{model.value === modelValue && <Icon name="check" size={14} />}</button>)}
+                          </div>
+                        </>}
                         {!catalogLoading && catalogError === undefined && availableModels.length === 0 && <div className="composer-popover-state"><span>还没有可用模型</span><button onClick={() => { localStorage.setItem('deepseek-desktop:settings-tab', 'models'); setComposerMenu(undefined); setView('settings') }} type="button">配置模型</button></div>}
                       </div>
                   </div>
                   {isStreaming ? (
-                    <button aria-label="停止生成" className="send-button stop-button" onClick={() => void cancel()} type="button"><span /></button>
+                    <button aria-label="强制停止当前任务" className="send-button stop-button" disabled={isCancelling} onClick={() => void cancel()} title={isCancelling ? '正在停止…' : '强制停止'} type="button"><span /></button>
                   ) : (
                     <button aria-label="发送" className="send-button" disabled={(input.trim() === '' && attachments.length === 0) || !ready} onClick={() => void send()} type="button">
                       <Icon name="arrow-up" size={17} strokeWidth={2} />
@@ -761,8 +1165,8 @@ export function ChatView(): React.ReactElement {
                 </div>
               </div>
             </div>
-            <div className="composer-footnote">
-              <span><Icon name="cache" size={13} />{cacheHit === undefined ? '上下文缓存路由已启用' : `缓存命中 ${String(cacheHit)}%`}</span>
+            <div aria-label="会话运行统计" className="composer-footnote">
+              {runtimeSummary.map((item) => <span key={item}>{item}</span>)}
             </div>
           </div>
         </section>
