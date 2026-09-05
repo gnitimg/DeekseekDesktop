@@ -173,6 +173,48 @@ export interface SessionStatsProjection {
   decodeTokens: number
 }
 
+export interface PermissionOption {
+  value: string
+  name: string
+  description?: string
+}
+
+export interface PermissionSelectProjection {
+  options: readonly PermissionOption[]
+  currentValue: string
+}
+
+export type ApprovalDecision = 'allowed-once' | 'rejected'
+
+export interface PendingApproval {
+  eventId: string
+  clientId: string
+  sessionId: string
+  toolName: string
+  callId?: string
+  reason?: string
+}
+
+export type RemoteEventDownlinkFrame =
+  | { type: 'ready', clientId: string, host: { home: string } }
+  | { type: 'emit', event: string, args: readonly unknown[] }
+  | { type: 'waterfall', event: string, eventId: string, agentId: string, request: Readonly<Record<string, unknown>> }
+  | { type: 'cancel', eventId: string }
+
+export interface RemoteEventResult {
+  clientId: string
+  eventId: string
+  outcome:
+    | { kind: 'next' }
+    | { kind: 'result', value?: unknown }
+    | { kind: 'rejected', error: { name: string, message: string, code?: string, details?: unknown } }
+}
+
+export interface CommandExecutionValue {
+  commandId: string
+  result?: { kind: string, text?: string }
+}
+
 export interface SessionControlBaseline {
   queues: Readonly<Record<string, readonly unknown[]>>
   jobs: Readonly<Record<string, readonly SessionJob[]>>

@@ -55,6 +55,8 @@ interface SshProfile {
 }
 
 const SSH_PROFILES_KEY = 'deepseek-desktop:ssh-profiles'
+const GIT_SETTINGS_KEY = 'deepseek-desktop:git-settings'
+const WORKTREE_SETTINGS_KEY = 'deepseek-desktop:worktree-settings'
 const SETTINGS_TAB_KEY = 'deepseek-desktop:settings-tab'
 const settingsTabIds: readonly SettingsTab[] = [
   'general', 'appearance', 'models', 'presets',
@@ -84,7 +86,56 @@ function readSshProfiles(): SshProfile[] {
   }
 }
 
-const emptySshDraft: Omit<SshProfile, 'id'> = { name: '', host: '', user: '', port: '22', identityFile: '' }
+const emptySshDraft: Omit<SshProfile, 'id'> = { name: '', host: '', user: '', port: '', identityFile: '' }
+
+interface GitSettings {
+  branchPrefix: string
+  mergeMethod: 'merge' | 'squash'
+  forceWithLease: boolean
+  draftPullRequests: boolean
+  reviewPresentation: 'inline' | 'separate'
+  autoMergeWhenReady: boolean
+  monitorInstructions: string
+  commitInstructions: string
+  pullRequestInstructions: string
+}
+
+interface WorktreeSettings {
+  rootDirectory: string
+  fetchBeforeCreate: boolean
+  autoDeleteOld: boolean
+  retentionLimit: number
+}
+
+const defaultGitSettings: GitSettings = {
+  branchPrefix: 'codex/',
+  mergeMethod: 'merge',
+  forceWithLease: false,
+  draftPullRequests: true,
+  reviewPresentation: 'inline',
+  autoMergeWhenReady: false,
+  monitorInstructions: '',
+  commitInstructions: '',
+  pullRequestInstructions: '',
+}
+
+const defaultWorktreeSettings: WorktreeSettings = {
+  rootDirectory: '',
+  fetchBeforeCreate: false,
+  autoDeleteOld: true,
+  retentionLimit: 15,
+}
+
+function readStoredSettings<T extends object>(key: string, fallback: T): T {
+  try {
+    const value = JSON.parse(localStorage.getItem(key) ?? '{}') as unknown
+    return typeof value === 'object' && value !== null && !Array.isArray(value)
+      ? { ...fallback, ...value as Partial<T> }
+      : fallback
+  } catch {
+    return fallback
+  }
+}
 
 interface ViewTransitionHandle { ready: Promise<void> }
 
@@ -128,6 +179,10 @@ export function SettingsView(): React.ReactElement {
   const [environmentLoading, setEnvironmentLoading] = useState(false)
   const [sshProfiles, setSshProfiles] = useState<SshProfile[]>(readSshProfiles)
   const [sshDraft, setSshDraft] = useState(emptySshDraft)
+  const [sshDialogOpen, setSshDialogOpen] = useState(false)
+  const [sshAuthentication, setSshAuthentication] = useState<'agent' | 'identity'>('agent')
+  const [gitSettings, setGitSettings] = useState<GitSettings>(() => readStoredSettings(GIT_SETTINGS_KEY, defaultGitSettings))
+  const [worktreeSettings, setWorktreeSettings] = useState<WorktreeSettings>(() => readStoredSettings(WORKTREE_SETTINGS_KEY, defaultWorktreeSettings))
 
   function changeAppearance(value: 'light' | 'dark' | 'system'): void {
     if (value === appearance) return
@@ -180,6 +235,14 @@ export function SettingsView(): React.ReactElement {
   useEffect(() => {
     if (tab === 'git' || tab === 'environment' || tab === 'worktrees') void refreshEnvironment()
   }, [tab, refreshEnvironment])
+
+  useEffect(() => {
+    localStorage.setItem(GIT_SETTINGS_KEY, JSON.stringify(gitSettings))
+  }, [gitSettings])
+
+  useEffect(() => {
+    localStorage.setItem(WORKTREE_SETTINGS_KEY, JSON.stringify(worktreeSettings))
+  }, [worktreeSettings])
 
   async function save(): Promise<void> {
     setSaving(true)
@@ -241,23 +304,33 @@ export function SettingsView(): React.ReactElement {
 
   function saveSshProfile(event: React.FormEvent): void {
     event.preventDefault()
-    if (sshDraft.host.trim() === '' || sshDraft.user.trim() === '') {
-      setError('SSH 连接需要填写主机与用户名')
+    const address = sshDraft.host.trim()
+    if (address === '') {
+      setError('SSH 连接需要填写主机名')
       return
     }
+    if (sshAuthentication === 'identity' && sshDraft.identityFile.trim() === '') {
+      setError('使用身份文件时需要填写私钥路径')
+      return
+    }
+    const separator = address.lastIndexOf('@')
+    const user = separator > 0 ? address.slice(0, separator) : ''
+    const host = separator > 0 ? address.slice(separator + 1) : address
     const profile: SshProfile = {
       ...sshDraft,
       id: globalThis.crypto.randomUUID(),
-      name: sshDraft.name.trim() || sshDraft.host.trim(),
-      host: sshDraft.host.trim(),
-      user: sshDraft.user.trim(),
+      name: sshDraft.name.trim() || host,
+      host,
+      user,
       port: sshDraft.port.trim() || '22',
-      identityFile: sshDraft.identityFile.trim(),
+      identityFile: sshAuthentication === 'identity' ? sshDraft.identityFile.trim() : '',
     }
     const next = [...sshProfiles, profile]
     setSshProfiles(next)
     localStorage.setItem(SSH_PROFILES_KEY, JSON.stringify(next))
     setSshDraft(emptySshDraft)
+    setSshAuthentication('agent')
+    setSshDialogOpen(false)
     setError(undefined)
   }
 
@@ -265,6 +338,13 @@ export function SettingsView(): React.ReactElement {
     const next = sshProfiles.filter((profile) => profile.id !== id)
     setSshProfiles(next)
     localStorage.setItem(SSH_PROFILES_KEY, JSON.stringify(next))
+  }
+
+  function closeSshDialog(): void {
+    setSshDialogOpen(false)
+    setSshDraft(emptySshDraft)
+    setSshAuthentication('agent')
+    setError(undefined)
   }
 
   return (
@@ -385,28 +465,23 @@ export function SettingsView(): React.ReactElement {
             )}
 
             {tab === 'connections' && (
-              <SettingsPane eyebrow="CONNECTIONS" title="连接" description="管理远程开发连接。当前支持保存 SSH 连接定义。">
-                {sshProfiles.length > 0 && <div className="settings-record-list ssh-profile-list">
-                  {sshProfiles.map((profile) => (
-                    <div className="settings-record-row" key={profile.id}>
-                      <span className="record-icon"><Icon name="terminal" size={17} /></span>
-                      <div><strong>{profile.name}</strong><small>{profile.user}@{profile.host}:{profile.port}{profile.identityFile === '' ? '' : ` · ${profile.identityFile}`}</small></div>
-                      <span className="record-status">已保存</span>
-                      <button aria-label={`移除 ${profile.name}`} className="icon-button subtle" onClick={() => removeSshProfile(profile.id)} type="button"><Icon name="trash" size={15} /></button>
-                    </div>
-                  ))}
-                </div>}
-                <form className="settings-card ssh-form" onSubmit={saveSshProfile}>
-                  <div className="settings-card-title"><div><strong>添加 SSH 连接</strong><small>仅保存主机定义，不在未连接时显示在线状态。</small></div></div>
-                  <div className="ssh-field-grid">
-                    <label className="field"><span>名称 <small>可选</small></span><input onChange={(event) => setSshDraft({ ...sshDraft, name: event.target.value })} placeholder="开发服务器" value={sshDraft.name} /></label>
-                    <label className="field"><span>主机</span><input onChange={(event) => setSshDraft({ ...sshDraft, host: event.target.value })} placeholder="192.168.1.10" value={sshDraft.host} /></label>
-                    <label className="field"><span>用户名</span><input onChange={(event) => setSshDraft({ ...sshDraft, user: event.target.value })} placeholder="ubuntu" value={sshDraft.user} /></label>
-                    <label className="field"><span>端口</span><input inputMode="numeric" onChange={(event) => setSshDraft({ ...sshDraft, port: event.target.value })} placeholder="22" value={sshDraft.port} /></label>
-                    <label className="field ssh-identity-field"><span>私钥路径 <small>可选</small></span><input onChange={(event) => setSshDraft({ ...sshDraft, identityFile: event.target.value })} placeholder="C:\\Users\\name\\.ssh\\id_ed25519" value={sshDraft.identityFile} /></label>
+              <SettingsPane eyebrow="CONNECTIONS" title="连接" description="管理本地与远程开发环境的连接。">
+                <div className="settings-subsection-heading">
+                  <div><h3>SSH 连接</h3><p>保存常用主机，之后可从项目选择器快速使用。</p></div>
+                  <button className="button button-primary settings-add-button" onClick={() => { setSshDialogOpen(true); setError(undefined) }} type="button"><Icon name="plus" size={15} />添加</button>
+                </div>
+                {sshProfiles.length > 0
+                  ? <div className="settings-record-list ssh-profile-list">
+                    {sshProfiles.map((profile) => (
+                      <div className="settings-record-row" key={profile.id}>
+                        <span className="record-icon"><Icon name="terminal" size={17} /></span>
+                        <div><strong>{profile.name}</strong><small>{profile.user === '' ? '' : profile.user + '@'}{profile.host}:{profile.port}{profile.identityFile === '' ? '' : ' · ' + profile.identityFile}</small></div>
+                        <span className="record-status">已保存</span>
+                        <button aria-label={'移除 ' + profile.name} className="icon-button subtle" onClick={() => removeSshProfile(profile.id)} type="button"><Icon name="trash" size={15} /></button>
+                      </div>
+                    ))}
                   </div>
-                  <div className="settings-card-actions"><button className="button button-primary" type="submit">保存连接</button></div>
-                </form>
+                  : <div className="connection-empty"><span><Icon name="link" size={21} /></span><strong>尚未添加连接</strong><small>添加 SSH 主机后会显示在此处。</small></div>}
               </SettingsPane>
             )}
 
@@ -423,22 +498,66 @@ export function SettingsView(): React.ReactElement {
             )}
 
             {tab === 'git' && (
-              <SettingsPane eyebrow="GIT" title="Git" description="读取当前项目的仓库与工作区状态。">
-                <EnvironmentToolbar loading={environmentLoading} onRefresh={() => void refreshEnvironment()} root={workspaceRoot} />
-                {workspaceRoot === undefined ? <SettingsEmpty icon="folder" title="未选择项目" detail="打开一个项目后即可查看 Git 状态。" />
-                  : environment?.isGit !== true ? <SettingsEmpty icon="branch" title="当前目录不是 Git 仓库" detail={workspaceRoot} />
-                    : <>
-                      <div className="settings-summary-grid">
-                        <SummaryCard label="当前分支" value={environment.branch ?? 'HEAD'} />
-                        <SummaryCard label="工作区" value={environment.changes.length === 0 ? '干净' : `${String(environment.changes.length)} 项变更`} />
-                        <SummaryCard label="本地分支" value={String(environment.branches.length)} />
-                      </div>
-                      <div className="settings-record-list git-change-list">
-                        {environment.changes.length === 0
-                          ? <div className="settings-record-empty"><Icon name="check" size={17} />没有未提交变更</div>
-                          : environment.changes.slice(0, 12).map((change) => <div className="settings-record-row" key={`${change.status}-${change.path}`}><code>{change.status}</code><div><strong>{change.path}</strong></div></div>)}
-                      </div>
-                    </>}
+              <SettingsPane eyebrow="GIT" title="Git" description="配置 ChatGPT 创建分支、提交和 Pull Request 时使用的默认行为。">
+                <div className="preference-list git-settings-card">
+                  <PreferenceRow title="分支前缀" description="ChatGPT 创建新分支时使用的前缀">
+                    <input aria-label="分支前缀" className="settings-compact-input" onChange={(event) => setGitSettings({ ...gitSettings, branchPrefix: event.target.value })} spellCheck={false} value={gitSettings.branchPrefix} />
+                  </PreferenceRow>
+                  <PreferenceRow title="Pull Request 合并方法" description="选择 ChatGPT 合并 Pull Request 的方式">
+                    <SegmentedControl
+                      ariaLabel="Pull Request 合并方法"
+                      onChange={(mergeMethod) => setGitSettings({ ...gitSettings, mergeMethod })}
+                      options={[{ label: '合并', value: 'merge' }, { label: '压缩合并', value: 'squash' }]}
+                      value={gitSettings.mergeMethod}
+                    />
+                  </PreferenceRow>
+                  <PreferenceRow title="始终强制推送" description="从 ChatGPT 推送时使用 --force-with-lease">
+                    <SettingsToggle checked={gitSettings.forceWithLease} label="始终强制推送" onChange={(forceWithLease) => setGitSettings({ ...gitSettings, forceWithLease })} />
+                  </PreferenceRow>
+                  <PreferenceRow title="创建草稿 Pull Request" description="从 ChatGPT 创建 PR 时默认使用草稿 Pull Request">
+                    <SettingsToggle checked={gitSettings.draftPullRequests} label="创建草稿 Pull Request" onChange={(draftPullRequests) => setGitSettings({ ...gitSettings, draftPullRequests })} />
+                  </PreferenceRow>
+                  <PreferenceRow title="审查结果呈现方式" description="尽可能在当前聊天中启动 /review，或启动单独的审查聊天">
+                    <SegmentedControl
+                      ariaLabel="审查结果呈现方式"
+                      onChange={(reviewPresentation) => setGitSettings({ ...gitSettings, reviewPresentation })}
+                      options={[{ label: '内联', value: 'inline' }, { label: '单独', value: 'separate' }]}
+                      value={gitSettings.reviewPresentation}
+                    />
+                  </PreferenceRow>
+                </div>
+
+                <SettingsSectionTitle title="监控并修复 Pull Request" />
+                <div className="preference-list git-settings-card">
+                  <PreferenceRow title="准备就绪时自动合并" description="继续监控，直到 Pull Request 合并">
+                    <SettingsToggle checked={gitSettings.autoMergeWhenReady} label="准备就绪时自动合并" onChange={(autoMergeWhenReady) => setGitSettings({ ...gitSettings, autoMergeWhenReady })} />
+                  </PreferenceRow>
+                  <SettingsTextArea
+                    description="监控 Pull Request 时需要遵循的额外要求"
+                    onChange={(monitorInstructions) => setGitSettings({ ...gitSettings, monitorInstructions })}
+                    placeholder="例如：检查通过后评论 /merge，并批准不相关的视觉回归变更…"
+                    title="监控说明"
+                    value={gitSettings.monitorInstructions}
+                  />
+                </div>
+
+                <SettingsSectionTitle title="生成说明" />
+                <div className="preference-list git-settings-card">
+                  <SettingsTextArea
+                    description="将添加到提交信息生成提示中"
+                    onChange={(commitInstructions) => setGitSettings({ ...gitSettings, commitInstructions })}
+                    placeholder="例如：使用约定式提交，并在正文中说明验证结果…"
+                    title="提交说明"
+                    value={gitSettings.commitInstructions}
+                  />
+                  <SettingsTextArea
+                    description="将添加到 PR 标题/描述生成提示中"
+                    onChange={(pullRequestInstructions) => setGitSettings({ ...gitSettings, pullRequestInstructions })}
+                    placeholder="例如：说明用户可见的变化、测试步骤和风险…"
+                    title="Pull Request 说明"
+                    value={gitSettings.pullRequestInstructions}
+                  />
+                </div>
               </SettingsPane>
             )}
 
@@ -454,10 +573,28 @@ export function SettingsView(): React.ReactElement {
             )}
 
             {tab === 'worktrees' && (
-              <SettingsPane eyebrow="WORKTREES" title="Worktrees" description="查看当前仓库已存在的 Git worktree。">
-                <EnvironmentToolbar loading={environmentLoading} onRefresh={() => void refreshEnvironment()} root={workspaceRoot} />
-                {environment?.isGit !== true ? <SettingsEmpty icon="layers" title="没有可用的 Worktree 信息" detail="请先打开一个 Git 项目。" />
-                  : <div className="settings-record-list worktree-list">
+              <SettingsPane eyebrow="WORKTREES" title="Worktrees" description="配置 ChatGPT 创建和清理 Git 工作树的方式。">
+                <div className="preference-list worktree-settings-card">
+                  <PreferenceRow title="工作树根目录" description="ChatGPT 创建托管工作树的目录。留空则使用默认位置">
+                    <input aria-label="工作树根目录" className="settings-wide-input" onChange={(event) => setWorktreeSettings({ ...worktreeSettings, rootDirectory: event.target.value })} placeholder="C:/Users/GNiTi/.codex/worktrees" spellCheck={false} value={worktreeSettings.rootDirectory} />
+                  </PreferenceRow>
+                  <PreferenceRow title="创建工作树前始终获取上游更新" description="在创建每个新工作树前获取上游更新">
+                    <SettingsToggle checked={worktreeSettings.fetchBeforeCreate} label="创建工作树前始终获取上游更新" onChange={(fetchBeforeCreate) => setWorktreeSettings({ ...worktreeSettings, fetchBeforeCreate })} />
+                  </PreferenceRow>
+                  <PreferenceRow title="自动删除旧工作树" description="推荐大多数用户启用。关闭后需要手动管理旧工作树和磁盘空间">
+                    <SettingsToggle checked={worktreeSettings.autoDeleteOld} label="自动删除旧工作树" onChange={(autoDeleteOld) => setWorktreeSettings({ ...worktreeSettings, autoDeleteOld })} />
+                  </PreferenceRow>
+                  <PreferenceRow title="自动删除限制" description="超过此数量后，较旧的托管工作树会自动被清理">
+                    <input aria-label="自动删除限制" className="settings-number-input" inputMode="numeric" max={99} min={1} onChange={(event) => setWorktreeSettings({ ...worktreeSettings, retentionLimit: Math.max(1, Math.min(99, Number(event.target.value) || 1)) })} type="number" value={worktreeSettings.retentionLimit} />
+                  </PreferenceRow>
+                </div>
+
+                <div className="worktree-section-heading">
+                  <div><h3>{environment?.isGit === true && environment.worktrees.length > 0 ? '当前工作树' : '尚无工作树'}</h3>{environment?.isGit === true && environment.worktrees.length > 0 && <span>{environment.worktrees.length}</span>}</div>
+                  <button aria-label="刷新工作树" className={environmentLoading ? 'worktree-refresh is-loading' : 'worktree-refresh'} disabled={workspaceRoot === undefined || environmentLoading} onClick={() => void refreshEnvironment()} type="button"><Icon name="refresh" size={17} /></button>
+                </div>
+                {environment?.isGit === true && environment.worktrees.length > 0
+                  ? <div className="settings-record-list worktree-list">
                     {environment.worktrees.map((worktree) => (
                       <div className="settings-record-row" key={worktree.path}>
                         <span className="record-icon"><Icon name="branch" size={16} /></span>
@@ -465,7 +602,8 @@ export function SettingsView(): React.ReactElement {
                         {worktree.head !== undefined && <code>{worktree.head}</code>}
                       </div>
                     ))}
-                  </div>}
+                  </div>
+                  : <div className="worktree-empty"><span><Icon name="layers" size={22} /></span><strong>ChatGPT 创建的工作树将显示在此处</strong><small>{workspaceRoot === undefined ? '打开项目后即可读取工作树。' : '当前项目还没有托管工作树。'}</small></div>}
               </SettingsPane>
             )}
 
@@ -483,6 +621,43 @@ export function SettingsView(): React.ReactElement {
           </div>
         </div>
       </section>
+      {sshDialogOpen && (
+        <div className="settings-dialog-backdrop" onPointerDown={(event) => { if (event.target === event.currentTarget) closeSshDialog() }}>
+          <form aria-labelledby="ssh-dialog-title" className="ssh-dialog" onSubmit={saveSshProfile}>
+            <div className="ssh-dialog-header">
+              <h2 id="ssh-dialog-title">添加 SSH 连接</h2>
+              <button aria-label="关闭" className="icon-button subtle" onClick={closeSshDialog} type="button"><Icon name="close" size={17} /></button>
+            </div>
+            <label className="ssh-dialog-field">
+              <span>显示名称</span>
+              <input autoFocus onChange={(event) => setSshDraft({ ...sshDraft, name: event.target.value })} value={sshDraft.name} />
+            </label>
+            <label className="ssh-dialog-field">
+              <span>主机名</span>
+              <input onChange={(event) => setSshDraft({ ...sshDraft, host: event.target.value })} placeholder="host.com 或 user@host.com" spellCheck={false} value={sshDraft.host} />
+            </label>
+            <label className="ssh-dialog-field">
+              <span>SSH 端口 <small>（可选）</small></span>
+              <input inputMode="numeric" onChange={(event) => setSshDraft({ ...sshDraft, port: event.target.value.replace(/\D/gu, '') })} value={sshDraft.port} />
+            </label>
+            <div aria-label="SSH 身份验证方式" className="ssh-auth-switch" role="group">
+              <button aria-pressed={sshAuthentication === 'agent'} className={sshAuthentication === 'agent' ? 'is-active' : ''} onClick={() => setSshAuthentication('agent')} type="button">无身份验证</button>
+              <button aria-pressed={sshAuthentication === 'identity'} className={sshAuthentication === 'identity' ? 'is-active' : ''} onClick={() => setSshAuthentication('identity')} type="button">身份文件</button>
+            </div>
+            {sshAuthentication === 'identity' && (
+              <label className="ssh-dialog-field ssh-identity-path">
+                <span>身份文件</span>
+                <input onChange={(event) => setSshDraft({ ...sshDraft, identityFile: event.target.value })} placeholder="C:\Users\name\.ssh\id_ed25519" spellCheck={false} value={sshDraft.identityFile} />
+              </label>
+            )}
+            {error !== undefined && <div className="ssh-dialog-error" role="alert">{error}</div>}
+            <div className="ssh-dialog-actions">
+              <button className="button" onClick={closeSshDialog} type="button">取消</button>
+              <button className="button button-primary" disabled={sshDraft.host.trim() === '' || (sshAuthentication === 'identity' && sshDraft.identityFile.trim() === '')} type="submit">保存</button>
+            </div>
+          </form>
+        </div>
+      )}
     </div>
   )
 }
@@ -500,20 +675,54 @@ function PreferenceRow({ title, description, children }: { title: string; descri
   return <div className="preference-row"><div><strong>{title}</strong><small>{description}</small></div>{children}</div>
 }
 
+function SettingsToggle({ checked, label, onChange }: { checked: boolean; label: string; onChange: (checked: boolean) => void }): React.ReactElement {
+  return (
+    <button aria-checked={checked} aria-label={label} className={checked ? 'settings-toggle is-checked' : 'settings-toggle'} onClick={() => onChange(!checked)} role="switch" type="button">
+      <span />
+    </button>
+  )
+}
+
+function SegmentedControl<T extends string>({ ariaLabel, value, options, onChange }: {
+  ariaLabel: string
+  value: T
+  options: readonly { label: string; value: T }[]
+  onChange: (value: T) => void
+}): React.ReactElement {
+  return (
+    <div aria-label={ariaLabel} className="settings-segmented" role="group">
+      {options.map((option) => (
+        <button aria-pressed={value === option.value} className={value === option.value ? 'is-selected' : ''} key={option.value} onClick={() => onChange(option.value)} type="button">{option.label}</button>
+      ))}
+    </div>
+  )
+}
+
+function SettingsSectionTitle({ title }: { title: string }): React.ReactElement {
+  return <div className="settings-section-title"><h3>{title}</h3></div>
+}
+
+function SettingsTextArea({ title, description, value, placeholder, onChange }: {
+  title: string
+  description: string
+  value: string
+  placeholder: string
+  onChange: (value: string) => void
+}): React.ReactElement {
+  return (
+    <div className="settings-text-area-row">
+      <div><strong>{title}</strong><small>{description}</small></div>
+      <textarea onChange={(event) => onChange(event.target.value)} placeholder={placeholder} rows={3} value={value} />
+    </div>
+  )
+}
+
 function PluginConfigRow({ icon, title, description }: { icon: 'terminal' | 'activity' | 'search' | 'cache'; title: string; description: string }): React.ReactElement {
   return <div className="plugin-config-row"><span><Icon name={icon} size={17} /></span><div><strong>{title}</strong><small>{description}</small></div><span className="enabled-dot" /><span className="plugin-config-status">已启用</span></div>
 }
 
 function EnvironmentToolbar({ root, loading, onRefresh }: { root: string | undefined; loading: boolean; onRefresh: () => void }): React.ReactElement {
   return <div className="environment-toolbar"><div><Icon name="folder" size={16} /><span>{root ?? '未选择项目'}</span></div><button aria-label="刷新项目状态" className={loading ? 'is-loading' : ''} disabled={root === undefined || loading} onClick={onRefresh} type="button"><Icon name="refresh" size={15} />刷新</button></div>
-}
-
-function SummaryCard({ label, value }: { label: string; value: string }): React.ReactElement {
-  return <div className="settings-summary-card"><span>{label}</span><strong>{value}</strong></div>
-}
-
-function SettingsEmpty({ icon, title, detail }: { icon: 'folder' | 'branch' | 'layers'; title: string; detail: string }): React.ReactElement {
-  return <div className="settings-empty"><span><Icon name={icon} size={20} /></span><strong>{title}</strong><small>{detail}</small></div>
 }
 
 function ShortcutRow({ label, keys }: { label: string; keys: string[] }): React.ReactElement {

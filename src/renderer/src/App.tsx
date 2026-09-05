@@ -6,7 +6,7 @@ import { SettingsView } from './components/SettingsView'
 import { Sidebar } from './components/Sidebar'
 import { dsh } from './dsh-client'
 import { useApp, type DesktopSession } from './store'
-import type { ModelSelection, SessionControlFrame, SessionSummary } from './types'
+import type { ModelSelection, RemoteEventDownlinkFrame, SessionControlFrame, SessionSummary } from './types'
 
 function pathName(path: string | undefined): string | undefined {
   if (path === undefined) return undefined
@@ -53,6 +53,9 @@ export function App(): React.ReactElement {
   const updateProjection = useApp((state) => state.updateProjection)
   const setControlJobs = useApp((state) => state.setControlJobs)
   const setControlError = useApp((state) => state.setControlError)
+  const upsertPendingApproval = useApp((state) => state.upsertPendingApproval)
+  const removePendingApproval = useApp((state) => state.removePendingApproval)
+  const clearPendingApprovals = useApp((state) => state.clearPendingApprovals)
   const connectionRevision = useApp((state) => state.connectionRevision)
   const appearance = useApp((state) => state.appearance)
 
@@ -73,12 +76,54 @@ export function App(): React.ReactElement {
   useEffect(() => {
     let disposed = false
     let cancelControl: (() => void) | undefined
+    let cancelEvents: (() => void) | undefined
     void (async () => {
       try {
         const url = await window.desktop.dsh.getUrl()
         if (url === undefined) throw new Error('DSH Host 尚未就绪')
         if (disposed) return
         setConnection(url)
+        let eventClientId: string | undefined
+        void dsh.events((frame: RemoteEventDownlinkFrame) => {
+          if (disposed) return
+          if (frame.type === 'ready') {
+            eventClientId = frame.clientId
+            return
+          }
+          if (frame.type === 'cancel') {
+            removePendingApproval(frame.eventId)
+            return
+          }
+          if (frame.type !== 'waterfall' || eventClientId === undefined) return
+          if (frame.event === 'approval/request') {
+            const toolName = frame.request.toolName
+            if (typeof toolName === 'string' && toolName !== '') {
+              upsertPendingApproval({
+                eventId: frame.eventId,
+                clientId: eventClientId,
+                sessionId: frame.agentId,
+                toolName,
+                ...(typeof frame.request.callId === 'string' ? { callId: frame.request.callId } : {}),
+                ...(typeof frame.request.reason === 'string' ? { reason: frame.request.reason } : {}),
+              })
+              return
+            }
+          }
+          void dsh.answerEvent({
+            clientId: eventClientId,
+            eventId: frame.eventId,
+            outcome: { kind: 'next' },
+          }).catch((error: unknown) => {
+            if (!disposed) setControlError(error instanceof Error ? error.message : String(error))
+          })
+        }, (message) => {
+          if (!disposed) setControlError(message)
+        }).then((cancel) => {
+          if (disposed) cancel()
+          else cancelEvents = cancel
+        }).catch((error: unknown) => {
+          if (!disposed) setControlError(error instanceof Error ? error.message : String(error))
+        })
         void dsh.control((frame: SessionControlFrame) => {
           if (disposed) return
           if (frame.type === 'baseline') {
@@ -122,8 +167,10 @@ export function App(): React.ReactElement {
     return () => {
       disposed = true
       cancelControl?.()
+      cancelEvents?.()
+      clearPendingApprovals()
     }
-  }, [connectionRevision, patchSession, replaceSessions, setConnection, setControlBaseline, setControlError, setControlJobs, updateProjection])
+  }, [clearPendingApprovals, connectionRevision, patchSession, removePendingApproval, replaceSessions, setConnection, setControlBaseline, setControlError, setControlJobs, updateProjection, upsertPendingApproval])
 
   return (
     <div className={`app-shell ${sidebarCollapsed ? 'is-sidebar-collapsed' : ''}`}>

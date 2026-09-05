@@ -1,9 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 import { dsh } from '../dsh-client'
 import { useApp } from '../store'
 import type {
-  ContextPressureProjection, ImageAttachment, ModelCatalog, ModelSelection, SessionEvent, SessionFollowEvent,
-  SessionFollowFrame, SessionStatsProjection, TokenUsageProjection, ProjectEnvironment,
+  ApprovalDecision, ContextPressureProjection, ImageAttachment, ModelCatalog, ModelSelection, PendingApproval,
+  PermissionOption, PermissionSelectProjection, SessionEvent, SessionFollowEvent, SessionFollowFrame,
+  SessionStatsProjection, TokenUsageProjection, ProjectEnvironment,
 } from '../types'
 import { BrandMark, Icon } from './Icon'
 import {
@@ -15,6 +18,7 @@ interface Message {
   role: 'user' | 'assistant'
   text: string
   reasoning?: string
+  reasoningComplete?: boolean
   streaming?: boolean
   optimistic?: boolean
   failed?: boolean
@@ -104,12 +108,14 @@ function finishLastAssistant(messages: Message[], text?: string, reasoning?: str
       role: 'assistant',
       text: text ?? '',
       ...(reasoning === undefined || reasoning === '' ? {} : { reasoning }),
+      ...(reasoning === undefined || reasoning === '' ? {} : { reasoningComplete: true }),
     }]
   }
   return [...messages.slice(0, -1), {
     ...last,
     text: text === undefined || text === '' ? last.text : text,
     ...(reasoning === undefined || reasoning === '' ? {} : { reasoning }),
+    ...(last.reasoning === undefined && (reasoning === undefined || reasoning === '') ? {} : { reasoningComplete: true }),
     streaming: false,
   }]
 }
@@ -160,6 +166,25 @@ function applyEvent(messages: Message[], event: SessionEvent): Message[] {
   }
   if (event.type === 'assistant/chunk') {
     const chunk = asObject(data?.chunk)
+    if (chunk?.type === 'block-end' || chunk?.type === 'reasoning-end') {
+      const completed = assistantContent(chunk.block)
+      const last = messages.at(-1)
+      if (last?.role === 'assistant' && (last.reasoning !== undefined || completed.reasoning !== '')) {
+        return [...messages.slice(0, -1), {
+          ...last,
+          ...(completed.reasoning === '' ? {} : { reasoning: completed.reasoning }),
+          reasoningComplete: true,
+        }]
+      }
+      return completed.reasoning === '' ? messages : [...messages, {
+        id: `assistant-${String(event.seq)}`,
+        role: 'assistant',
+        text: '',
+        reasoning: completed.reasoning,
+        reasoningComplete: true,
+        streaming: true,
+      }]
+    }
     if ((chunk?.type !== 'text-delta' && chunk?.type !== 'reasoning-delta') || typeof chunk.text !== 'string') return messages
     const isReasoning = chunk.type === 'reasoning-delta'
     const last = messages.at(-1)
@@ -167,14 +192,16 @@ function applyEvent(messages: Message[], event: SessionEvent): Message[] {
       return [...messages.slice(0, -1), {
         ...last,
         text: isReasoning ? last.text : last.text + chunk.text,
-        ...(isReasoning ? { reasoning: (last.reasoning ?? '') + chunk.text } : {}),
+        ...(isReasoning
+          ? { reasoning: (last.reasoning ?? '') + chunk.text, reasoningComplete: false }
+          : last.reasoning === undefined ? {} : { reasoningComplete: true }),
       }]
     }
     return [...messages, {
       id: `assistant-${event.seq}`,
       role: 'assistant',
       text: isReasoning ? '' : chunk.text,
-      ...(isReasoning ? { reasoning: chunk.text } : {}),
+      ...(isReasoning ? { reasoning: chunk.text, reasoningComplete: false } : {}),
       streaming: true,
     }]
   }
@@ -187,7 +214,11 @@ function applyEvent(messages: Message[], event: SessionEvent): Message[] {
     const text = contentText(event.data)
     const last = messages.at(-1)
     if (last?.role === 'assistant' && last.streaming === true) {
-      return [...messages.slice(0, -1), { ...last, text: last.text + text }]
+      return [...messages.slice(0, -1), {
+        ...last,
+        text: last.text + text,
+        ...(last.reasoning === undefined ? {} : { reasoningComplete: true }),
+      }]
     }
     return text === '' ? messages : [...messages, { id: `assistant-${event.seq}`, role: 'assistant', text, streaming: true }]
   }
@@ -204,7 +235,33 @@ function historyFrom(records: unknown[]): Message[] {
     const event = eventFromRecord(record)
     return event === undefined ? current : applyEvent(current, event)
   }, [])
-  return messages.map((message) => ({ ...message, streaming: false, optimistic: false }))
+  return messages.map((message) => ({
+    ...message,
+    streaming: false,
+    optimistic: false,
+    ...(message.reasoning === undefined ? {} : { reasoningComplete: true }),
+  }))
+}
+
+type ConversationEntry =
+  | { kind: 'user', id: string, message: Message }
+  | { kind: 'assistant', id: string, messages: Message[] }
+
+function conversationEntries(messages: readonly Message[]): ConversationEntry[] {
+  const entries: ConversationEntry[] = []
+  for (const message of messages) {
+    if (message.role === 'user') {
+      entries.push({ kind: 'user', id: message.id, message })
+      continue
+    }
+    const last = entries.at(-1)
+    if (last?.kind === 'assistant') {
+      last.messages.push(message)
+    } else {
+      entries.push({ kind: 'assistant', id: message.id, messages: [message] })
+    }
+  }
+  return entries
 }
 
 function greeting(): string {
@@ -254,6 +311,57 @@ const modelProviderNames: Readonly<Record<string, string>> = {
   fnlp: 'FNLP',
 }
 const modelRoutePrefixes: ReadonlySet<string> = new Set(['pro', 'lora', 'free'])
+const fallbackPermissionOptions: readonly PermissionOption[] = [
+  { value: 'read-only', name: '仅可查看', description: '可以读取文件；修改和命令需要批准' },
+  { value: 'workspace-write', name: '工作区内修改', description: '可以修改当前工作区；越界操作需要批准' },
+  { value: 'danger-full-access', name: '完全权限', description: '可直接执行敏感操作，仅用于可信任务' },
+]
+
+function permissionSelectOf(value: unknown): PermissionSelectProjection | undefined {
+  const object = asObject(value)
+  if (object === undefined || typeof object.currentValue !== 'string' || !Array.isArray(object.options)) return undefined
+  const options = object.options.flatMap((candidate): PermissionOption[] => {
+    const option = asObject(candidate)
+    if (typeof option?.value !== 'string' || typeof option.name !== 'string') return []
+    return [{
+      value: option.value,
+      name: option.name,
+      ...(typeof option.description === 'string' ? { description: option.description } : {}),
+    }]
+  })
+  return options.length === 0 ? undefined : { currentValue: object.currentValue, options }
+}
+
+function permissionLabel(option: PermissionOption | undefined, value: string): string {
+  if (value === 'read-only') return '仅可查看'
+  if (value === 'workspace-write') return '工作区内修改'
+  if (value === 'danger-full-access') return '完全权限'
+  return option?.name ?? value
+}
+
+function traceCommand(blocks: readonly TraceBlock[], approval: PendingApproval): string | undefined {
+  for (const block of [...blocks].reverse()) {
+    if (block.kind !== 'tool') continue
+    if (approval.callId !== undefined && !block.detail.includes(approval.callId)) continue
+    if (approval.callId === undefined && block.label !== approval.toolName) continue
+    try {
+      const detail = asObject(JSON.parse(block.detail) as unknown)
+      const rawArguments = detail?.arguments
+      if (typeof rawArguments === 'string') {
+        try {
+          const parsed = asObject(JSON.parse(rawArguments) as unknown)
+          if (typeof parsed?.command === 'string') return parsed.command
+        } catch {
+          return rawArguments
+        }
+      }
+      if (typeof detail?.command === 'string') return detail.command
+    } catch {
+      continue
+    }
+  }
+  return undefined
+}
 
 function modelProviderName(modelId: string, fallback: string): string {
   const segments = modelId.split('/').filter(Boolean)
@@ -465,7 +573,6 @@ export function ChatView(): React.ReactElement {
   const selectSession = useApp((state) => state.selectSession)
   const setView = useApp((state) => state.setView)
   const agentPreset = useApp((state) => state.agentPreset)
-  const setAgentPreset = useApp((state) => state.setAgentPreset)
   const pinnedSessionIds = useApp((state) => state.pinnedSessionIds)
   const toggleSessionPin = useApp((state) => state.toggleSessionPin)
   const archiveSessionLocally = useApp((state) => state.archiveSessionLocally)
@@ -475,6 +582,8 @@ export function ChatView(): React.ReactElement {
   const toggleInspector = useApp((state) => state.toggleInspector)
   const projectionBaselines = useApp((state) => state.projectionBaselines)
   const controlJobs = useApp((state) => state.controlJobs)
+  const pendingApprovals = useApp((state) => state.pendingApprovals)
+  const removePendingApproval = useApp((state) => state.removePendingApproval)
   const activeSession = sessions.find((session) => session.id === activeSessionId)
   const [messagesBySession, setMessagesBySession] = useState<Record<string, Message[]>>({})
   const [metricFoldsBySession, setMetricFoldsBySession] = useState<Record<string, SessionMetricFold>>({})
@@ -495,15 +604,32 @@ export function ChatView(): React.ReactElement {
   const [taskArchiveConfirm, setTaskArchiveConfirm] = useState(false)
   const [environment, setEnvironment] = useState<ProjectEnvironment | undefined>()
   const [environmentLoading, setEnvironmentLoading] = useState(false)
-  const [composerMenu, setComposerMenu] = useState<'project' | 'worktree' | 'mode' | 'model' | undefined>()
+  const [composerMenu, setComposerMenu] = useState<'project' | 'worktree' | 'permission' | 'model' | undefined>()
+  const [switchingPermission, setSwitchingPermission] = useState<string | undefined>()
+  const [fullAccessConfirmation, setFullAccessConfirmation] = useState(false)
+  const [fullAccessAcknowledged, setFullAccessAcknowledged] = useState(false)
+  const [answeringApprovalId, setAnsweringApprovalId] = useState<string | undefined>()
+  const [approvalError, setApprovalError] = useState<string | undefined>()
   const cancelFollowRef = useRef<(() => void) | undefined>(undefined)
   const endRef = useRef<HTMLDivElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const taskMenuRef = useRef<HTMLDivElement>(null)
   const composerRef = useRef<HTMLDivElement>(null)
   const messages = activeSessionId === undefined ? [] : messagesBySession[activeSessionId] ?? []
+  const groupedMessages = useMemo(() => conversationEntries(messages), [messages])
+  const traceBlocks = activeSessionId === undefined ? [] : traceBySession[activeSessionId] ?? []
+  const pendingApproval = pendingApprovals.find((approval) => approval.sessionId === activeSessionId)
+  const approvalCommand = useMemo(
+    () => pendingApproval === undefined ? undefined : traceCommand(traceBlocks, pendingApproval),
+    [pendingApproval, traceBlocks],
+  )
   const fallbackMetrics = activeSessionId === undefined ? undefined : metricFoldsBySession[activeSessionId]
   const projectionValues = activeSessionId === undefined ? undefined : projectionBaselines[activeSessionId]?.values
+  const permissionProjection = permissionSelectOf(projectionValues?.permissions)
+  const permissionOptions = permissionProjection?.options ?? fallbackPermissionOptions
+  const permissionValue = switchingPermission ?? permissionProjection?.currentValue ?? 'workspace-write'
+  const permissionCurrent = permissionOptions.find((option) => option.value === permissionValue)
+  const permissionCurrentLabel = permissionLabel(permissionCurrent, permissionValue)
   const tokenUsage = tokenUsageOf(projectionValues?.tokenUsage) ?? fallbackMetrics?.tokenUsage
   const stats = statsOf(projectionValues?.sessionStats) ?? fallbackMetrics?.stats
   const pressure = pressureOf(projectionValues?.contextPressure)
@@ -660,7 +786,22 @@ export function ChatView(): React.ReactElement {
     setTaskMenuOpen(false)
     setTaskRenaming(false)
     setTaskArchiveConfirm(false)
+    setComposerMenu(undefined)
+    setSwitchingPermission(undefined)
+    setFullAccessConfirmation(false)
+    setFullAccessAcknowledged(false)
   }, [activeSessionId])
+
+  useEffect(() => {
+    setApprovalError(undefined)
+    setAnsweringApprovalId(undefined)
+  }, [pendingApproval?.eventId])
+
+  useEffect(() => {
+    if (switchingPermission !== undefined && permissionProjection?.currentValue === switchingPermission) {
+      setSwitchingPermission(undefined)
+    }
+  }, [permissionProjection?.currentValue, switchingPermission])
 
   useEffect(() => {
     if (!taskMenuOpen) return
@@ -791,6 +932,55 @@ export function ChatView(): React.ReactElement {
       setError(reason instanceof Error ? reason.message : String(reason))
     } finally {
       setSelectingModel(false)
+    }
+  }
+
+  async function switchPermission(value: string): Promise<void> {
+    if (activeSessionId === undefined || switchingPermission !== undefined) return
+    setComposerMenu(undefined)
+    setSwitchingPermission(value)
+    setError(undefined)
+    try {
+      const execution = await dsh.executeCommand(activeSessionId, `/permission ${value}`)
+      if (execution === undefined) throw new Error('当前会话没有提供 /permission 权限命令')
+      if (execution.result?.kind === 'error') {
+        throw new Error(execution.result.text ?? '权限模式切换失败')
+      }
+      window.setTimeout(() => {
+        setSwitchingPermission((current) => current === value ? undefined : current)
+      }, 1_200)
+    } catch (reason) {
+      setSwitchingPermission(undefined)
+      setError(reason instanceof Error ? reason.message : String(reason))
+    }
+  }
+
+  function choosePermission(value: string): void {
+    setComposerMenu(undefined)
+    if (value === permissionProjection?.currentValue || value === switchingPermission) return
+    if (value === 'danger-full-access') {
+      setFullAccessAcknowledged(false)
+      setFullAccessConfirmation(true)
+      return
+    }
+    void switchPermission(value)
+  }
+
+  async function answerApproval(decision: ApprovalDecision): Promise<void> {
+    if (pendingApproval === undefined || answeringApprovalId !== undefined) return
+    setAnsweringApprovalId(pendingApproval.eventId)
+    setApprovalError(undefined)
+    try {
+      await dsh.answerEvent({
+        clientId: pendingApproval.clientId,
+        eventId: pendingApproval.eventId,
+        outcome: { kind: 'result', value: decision },
+      })
+      removePendingApproval(pendingApproval.eventId)
+    } catch (reason) {
+      setApprovalError(reason instanceof Error ? reason.message : String(reason))
+    } finally {
+      setAnsweringApprovalId(undefined)
     }
   }
 
@@ -1005,7 +1195,44 @@ export function ChatView(): React.ReactElement {
         </div>
       </header>
 
-      <TrajectoryStrip blocks={activeSessionId === undefined ? [] : traceBySession[activeSessionId] ?? []} />
+      <TrajectoryStrip blocks={traceBlocks} />
+
+      {fullAccessConfirmation && (
+        <div
+          className="permission-confirm-backdrop"
+          onPointerDown={(event) => {
+            if (event.currentTarget === event.target) {
+              setFullAccessConfirmation(false)
+              setFullAccessAcknowledged(false)
+            }
+          }}
+        >
+          <div aria-labelledby="permission-confirm-title" aria-modal="true" className="permission-confirm-dialog" role="dialog">
+            <div className="permission-confirm-icon"><Icon name="shield" size={20} /></div>
+            <h2 id="permission-confirm-title">确认启用完全权限？</h2>
+            <p>启用后，智能体将减少确认步骤，并可直接执行敏感操作、文件修改或外部命令。仅建议在你信任当前任务时使用。</p>
+            <label className="permission-confirm-check">
+              <input checked={fullAccessAcknowledged} onChange={(event) => setFullAccessAcknowledged(event.target.checked)} type="checkbox" />
+              <span>我了解完全权限会扩大此任务可执行的操作范围</span>
+            </label>
+            <div className="permission-confirm-actions">
+              <button onClick={() => { setFullAccessConfirmation(false); setFullAccessAcknowledged(false) }} type="button">取消</button>
+              <button
+                className="is-primary"
+                disabled={!fullAccessAcknowledged || switchingPermission !== undefined}
+                onClick={() => {
+                  setFullAccessConfirmation(false)
+                  setFullAccessAcknowledged(false)
+                  void switchPermission('danger-full-access')
+                }}
+                type="button"
+              >
+                启用完全权限
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       <div className={`chat-workbench ${inspectorOpen ? 'has-inspector' : ''}`}>
         <section className="conversation-shell">
@@ -1039,38 +1266,52 @@ export function ChatView(): React.ReactElement {
               </div>
             ) : (
               <div className="message-list">
-                {messages.map((message) => message.role === 'user' ? (
-                  <article className="message-user" key={message.id}>
+                {groupedMessages.map((entry) => entry.kind === 'user' ? (
+                  <article className="message-user" key={entry.id}>
                     <div>
                       <div className="message-user-heading">
-                        <div className="message-meta"><span>你</span>{message.optimistic === true && <small>发送中</small>}</div>
+                        <div className="message-meta"><span>你</span>{entry.message.optimistic === true && <small>发送中</small>}</div>
                         <div className="message-actions">
-                          <button aria-label="复制消息" disabled={message.text === ''} onClick={() => void copyMessage(message)} title="复制" type="button"><Icon name={copiedMessageId === message.id ? 'check' : 'copy'} size={13} /></button>
-                          <button aria-label="修改并重新发送" disabled={message.text === ''} onClick={() => void editMessage(message)} title="修改并重新发送" type="button"><Icon name="edit" size={13} /></button>
-                          {isStreaming && message.id === lastUserMessageId && <button aria-label="强制停止当前任务" className="is-danger" disabled={isCancelling} onClick={() => void cancel()} title="强制停止" type="button"><span className="stop-glyph" /></button>}
+                          <button aria-label="复制消息" disabled={entry.message.text === ''} onClick={() => void copyMessage(entry.message)} title="复制" type="button"><Icon name={copiedMessageId === entry.message.id ? 'check' : 'copy'} size={13} /></button>
+                          <button aria-label="修改并重新发送" disabled={entry.message.text === ''} onClick={() => void editMessage(entry.message)} title="修改并重新发送" type="button"><Icon name="edit" size={13} /></button>
+                          {isStreaming && entry.message.id === lastUserMessageId && <button aria-label="强制停止当前任务" className="is-danger" disabled={isCancelling} onClick={() => void cancel()} title="强制停止" type="button"><span className="stop-glyph" /></button>}
                         </div>
                       </div>
-                      {message.attachments !== undefined && <div className="message-attachments">{message.attachments.map((item, index) => <span key={`${item.name}-${String(index)}`}><Icon name="paperclip" size={12} />{item.name}</span>)}</div>}
-                      {message.text !== '' && <p>{message.text}</p>}
+                      {entry.message.attachments !== undefined && <div className="message-attachments">{entry.message.attachments.map((item, index) => <span key={`${item.name}-${String(index)}`}><Icon name="paperclip" size={12} />{item.name}</span>)}</div>}
+                      {entry.message.text !== '' && <p>{entry.message.text}</p>}
                     </div>
                   </article>
                 ) : (
-                  <article className={`message-assistant ${message.failed === true ? 'is-failed' : ''}`} key={message.id}>
+                  <article className={`message-assistant ${entry.messages.some((message) => message.failed === true) ? 'is-failed' : ''}`} key={entry.id}>
                     <div className="assistant-rail"><BrandMark size={24} /></div>
                     <div className="assistant-content">
                       <div className="message-meta">
                         <span>DeepSeek</span>
-                        {message.streaming === true && <small className="working-label"><i />正在工作</small>}
+                        {entry.messages.some((message) => message.streaming === true) && <small className="working-label"><i />正在工作</small>}
                       </div>
-                      {message.reasoning !== undefined && message.reasoning !== '' && (
-                        <details className="reasoning-disclosure">
-                          <summary><span>思考中</span><span aria-hidden="true" className="reasoning-caret">&gt;</span></summary>
-                          <div className="reasoning-body">{message.reasoning}</div>
-                        </details>
-                      )}
-                      {message.text === '' && message.streaming === true
-                        ? message.reasoning === undefined || message.reasoning === '' ? <div className="agent-thinking"><span aria-label="正在思考" className="agent-cursor" /></div> : null
-                        : <p>{message.text}{message.streaming === true && <span aria-label="正在生成" className="agent-cursor" />}</p>}
+                      <div className="assistant-step-list">
+                        {entry.messages.map((message) => (
+                          <div className={`assistant-step ${message.failed === true ? 'is-failed' : ''}`} key={message.id}>
+                            {message.reasoning !== undefined && message.reasoning !== '' && (
+                              <details className="reasoning-disclosure">
+                                <summary>
+                                  <span>{message.reasoningComplete === true || message.streaming !== true ? '思考完成' : '思考中'}</span>
+                                  <span aria-hidden="true" className="reasoning-caret">&gt;</span>
+                                </summary>
+                                <div className="reasoning-body">{message.reasoning}</div>
+                              </details>
+                            )}
+                            {message.text === '' && message.streaming === true
+                              ? message.reasoning === undefined || message.reasoning === '' ? <div className="agent-thinking"><span aria-label="正在思考" className="agent-cursor" /></div> : null
+                              : message.text === '' ? null : (
+                                <div className="assistant-markdown">
+                                  <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.text}</ReactMarkdown>
+                                  {message.streaming === true && <span aria-label="正在生成" className="agent-cursor" />}
+                                </div>
+                              )}
+                          </div>
+                        ))}
+                      </div>
                     </div>
                   </article>
                 ))}
@@ -1080,6 +1321,26 @@ export function ChatView(): React.ReactElement {
           </div>
 
           <div className="composer-dock">
+            {pendingApproval !== undefined ? (
+              <div className="approval-composer" data-approval-id={pendingApproval.eventId}>
+                <div className="approval-strip"><span />等待你的批准</div>
+                <div aria-label="审批详情" className="approval-body" role="group" tabIndex={0}>
+                  <div className="approval-shield"><Icon name="shield" size={18} /></div>
+                  <div className="approval-copy">
+                    <strong>{pendingApproval.reason ?? `${pendingApproval.toolName} 请求执行受限操作`}</strong>
+                    <small>{pendingApproval.toolName}{pendingApproval.callId === undefined ? '' : ` · ${pendingApproval.callId}`}</small>
+                    {approvalCommand !== undefined && <pre>{approvalCommand}</pre>}
+                    {approvalError !== undefined && <p className="approval-error">{approvalError}</p>}
+                  </div>
+                </div>
+                <div className="approval-actions">
+                  <button disabled={answeringApprovalId !== undefined} onClick={() => void answerApproval('rejected')} type="button">拒绝</button>
+                  <button className="is-primary" disabled={answeringApprovalId !== undefined} onClick={() => void answerApproval('allowed-once')} type="button">
+                    {answeringApprovalId === pendingApproval.eventId ? '处理中…' : '允许一次'}
+                  </button>
+                </div>
+              </div>
+            ) : (
             <div className={`composer ${isStreaming ? 'is-streaming' : ''}`} ref={composerRef}>
               <div className="composer-context">
                 <div className="composer-menu-anchor">
@@ -1133,10 +1394,33 @@ export function ChatView(): React.ReactElement {
                 <div className="composer-tools">
                   <button aria-label="添加图片上下文" className="composer-icon-button" onClick={() => void chooseImages()} type="button"><Icon name="plus" size={17} /></button>
                   <div className="composer-menu-anchor">
-                    <button className={`mode-button ${composerMenu === 'mode' ? 'is-open' : ''}`} onClick={() => setComposerMenu((current) => current === 'mode' ? undefined : 'mode')} type="button"><Icon name="shield" size={16} /><span>{agentPreset === 'standard' ? '自动编排' : agentPreset}</span><Icon className="composer-chevron" name="chevron-down" size={13} /></button>
-                      <div aria-hidden={composerMenu !== 'mode'} className={`composer-popover composer-mode-popover ${composerMenu === 'mode' ? 'is-open' : ''}`}>
-                        <span className="composer-popover-label">Agent 预设</span>
-                        {[['standard', '自动编排', '完整工具与计划能力'], ['minimal', '极简模式', '更轻的上下文'], ['code', 'PTC 模式', '程序化工具编排'], ['cordis', '创造模式', '插件与预设开发']].map(([id, label, detail]) => <button className={agentPreset === id ? 'is-selected' : ''} key={id} onClick={() => { setAgentPreset(id); setComposerMenu(undefined) }} type="button"><Icon name="shield" size={14} /><span><strong>{label}</strong><small>{detail}</small></span>{agentPreset === id && <Icon name="check" size={14} />}</button>)}
+                    <button
+                      aria-label={`访问模式：${permissionCurrentLabel}`}
+                      className={`mode-button ${composerMenu === 'permission' ? 'is-open' : ''}`}
+                      disabled={activeSessionId === undefined || switchingPermission !== undefined}
+                      onClick={() => setComposerMenu((current) => current === 'permission' ? undefined : 'permission')}
+                      title={permissionCurrent?.description}
+                      type="button"
+                    >
+                      <Icon name="shield" size={16} />
+                      <span>{permissionCurrentLabel}</span>
+                      <Icon className="composer-chevron" name="chevron-down" size={13} />
+                    </button>
+                      <div aria-hidden={composerMenu !== 'permission'} className={`composer-popover composer-mode-popover ${composerMenu === 'permission' ? 'is-open' : ''}`} role="menu">
+                        <span className="composer-popover-label">访问模式</span>
+                        {permissionOptions.filter((option) => option.value !== 'custom').map((option) => {
+                          const selected = permissionValue === option.value
+                          return (
+                            <button className={selected ? 'is-selected' : ''} key={option.value} onClick={() => choosePermission(option.value)} role="menuitem" type="button">
+                              <Icon name="shield" size={14} />
+                              <span>
+                                <strong>{permissionLabel(option, option.value)}</strong>
+                                <small>{option.description ?? fallbackPermissionOptions.find((item) => item.value === option.value)?.description}</small>
+                              </span>
+                              {selected && <Icon name="check" size={14} />}
+                            </button>
+                          )
+                        })}
                       </div>
                   </div>
                 </div>
@@ -1165,6 +1449,7 @@ export function ChatView(): React.ReactElement {
                 </div>
               </div>
             </div>
+            )}
             <div aria-label="会话运行统计" className="composer-footnote">
               {runtimeSummary.map((item) => <span key={item}>{item}</span>)}
             </div>
