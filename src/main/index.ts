@@ -9,7 +9,17 @@ import { basename, extname } from 'node:path'
 import { readFileSync } from 'node:fs'
 import { existsSync, statSync } from 'node:fs'
 import { execFile, spawn } from 'node:child_process'
-import { startDshHost, type DshHostHandle, installPlugin, readDesktopEnv, writeDesktopEnv } from './dsh-host'
+import {
+  startDshHost,
+  type DshHostHandle,
+  installPlugin,
+  listInstalledPlugins,
+  readDesktopEnv,
+  setPluginEnabled,
+  uninstallPlugin,
+  writeDesktopEnv,
+  type PluginMutation,
+} from './dsh-host'
 import { createDshApiProxy, type DshApiProxy } from './dsh-client'
 
 const here = dirname(fileURLToPath(import.meta.url))
@@ -19,6 +29,78 @@ let proxy: DshApiProxy | undefined
 let mainWindow: BrowserWindow | undefined
 let isQuitting = false
 let isRestartingHost = false
+let pluginMutationQueue: Promise<void> = Promise.resolve()
+
+function queuePluginMutation<T>(operation: () => Promise<T>): Promise<T> {
+  const pending = pluginMutationQueue.then(operation, operation)
+  pluginMutationQueue = pending.then(() => {}, () => {})
+  return pending
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
+}
+
+async function currentDshUrl(): Promise<string> {
+  return host?.url ?? await restartDshHost()
+}
+
+async function applyPluginMutation(
+  operation: () => Promise<PluginMutation>,
+  rollback: (mutation: PluginMutation) => Promise<void>,
+): Promise<PluginMutation & { dshUrl: string }> {
+  const mutation = await operation()
+  try {
+    const dshUrl = await restartDshHost()
+    return { ...mutation, dshUrl }
+  } catch (error) {
+    try {
+      await rollback(mutation)
+      await restartDshHost()
+    } catch (recoveryError) {
+      throw new Error(
+        '插件加载失败，且自动回滚未能恢复 DSH。原始错误：' + errorMessage(error) +
+        '；恢复错误：' + errorMessage(recoveryError),
+      )
+    }
+    throw new Error('插件未能加载，已自动回滚到之前的配置：' + errorMessage(error))
+  }
+}
+
+async function uninstallPluginSafely(name: string): Promise<PluginMutation & { dshUrl: string }> {
+  const installed = listInstalledPlugins().find((plugin) => plugin.name === name)
+  if (installed === undefined) throw new Error('插件未安装：' + name)
+
+  if (installed.enabled) {
+    await applyPluginMutation(
+      () => setPluginEnabled(name, false),
+      async () => { await setPluginEnabled(name, true) },
+    )
+  }
+
+  try {
+    const mutation = await uninstallPlugin(name)
+    return { ...mutation, dshUrl: await currentDshUrl() }
+  } catch (error) {
+    if (installed.enabled) {
+      try {
+        await setPluginEnabled(name, true)
+        await restartDshHost()
+      } catch (recoveryError) {
+        throw new Error(
+          '插件卸载失败，且未能恢复原启用状态。原始错误：' + errorMessage(error) +
+          '；恢复错误：' + errorMessage(recoveryError),
+        )
+      }
+      throw new Error('插件卸载失败，已恢复原启用状态：' + errorMessage(error))
+    }
+    throw error
+  }
+}
+
+function assertGithubPluginSpec(spec: string): void {
+  if (!/^[a-z0-9_.-]+\/[a-z0-9_.-]+$/iu.test(spec)) throw new Error('插件来源必须是有效的 GitHub owner/repository')
+}
 
 function syncWindowChrome(): void {
   const dark = nativeTheme.shouldUseDarkColors
@@ -52,6 +134,7 @@ async function restartDshHost(): Promise<string> {
       const nextProxy = await createDshApiProxy(nextHost.url, (frame) => { mainWindow?.webContents.send('dsh:stream:frame', frame) })
       proxy = nextProxy
       observeHostExit(nextHost)
+      mainWindow?.webContents.send('dsh:host-restarted', nextHost.url)
       return nextHost.url
     } catch (error) {
       host = undefined
@@ -186,7 +269,39 @@ async function bootstrap(): Promise<void> {
   ipcMain.handle('dsh:stream:open', (_event, endpoint: string, args: unknown) => proxy?.openStream(endpoint, args))
   ipcMain.handle('dsh:stream:cancel', (_event, streamId: string) => { proxy?.cancelStream(streamId) })
   ipcMain.handle('plugins:list', () => fetchPlugins())
-  ipcMain.handle('plugins:install', (_event, spec: string) => installPlugin(spec))
+  ipcMain.handle('plugins:installed', () => listInstalledPlugins())
+  ipcMain.handle('plugins:install', (_event, spec: string) => {
+    assertGithubPluginSpec(spec)
+    return queuePluginMutation(async () => {
+      const before = new Map(listInstalledPlugins().map((plugin) => [plugin.name, plugin]))
+      return await applyPluginMutation(
+        () => installPlugin(spec),
+        async (mutation) => {
+          const plugin = mutation.plugin
+          if (plugin === undefined) return
+          const previous = before.get(plugin.name)
+          if (previous === undefined) await uninstallPlugin(plugin.name)
+          else await setPluginEnabled(plugin.name, previous.enabled)
+        },
+      )
+    })
+  })
+  ipcMain.handle('plugins:set-enabled', (_event, name: string, enabled: boolean) => {
+    if (typeof enabled !== 'boolean') throw new Error('插件启用状态无效')
+    return queuePluginMutation(async () => {
+      const previous = listInstalledPlugins().find((plugin) => plugin.name === name)
+      if (previous === undefined) throw new Error('插件未安装：' + name)
+      const mutation = await setPluginEnabled(name, enabled)
+      if (previous.enabled === enabled) return { ...mutation, dshUrl: await currentDshUrl() }
+      return await applyPluginMutation(
+        async () => mutation,
+        async () => { await setPluginEnabled(name, previous.enabled) },
+      )
+    })
+  })
+  ipcMain.handle('plugins:uninstall', (_event, name: string) => {
+    return queuePluginMutation(() => uninstallPluginSafely(name))
+  })
   ipcMain.handle('settings:read', () => readDesktopEnv())
   ipcMain.handle('settings:write', async (_event, env: Record<string, string>) => {
     const previous = readDesktopEnv()

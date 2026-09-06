@@ -4824,3 +4824,384 @@ html[data-theme="dark"] .ssh-dialog-actions .button-primary:disabled {
     padding: 20px;
   }
 }
+
+/* Installed plugins are operational controls, separated from the community catalog. */
+.installed-plugin-section,
+.market-directory-heading {
+  width: min(1080px, 100%);
+  margin-inline: auto;
+}
+
+.installed-plugin-section {
+  overflow: hidden;
+  margin-bottom: 38px;
+  border: 1px solid #dfdcd6;
+  border-radius: 15px;
+  background: #fff;
+  box-shadow: 0 8px 24px rgba(34, 33, 29, .035);
+}
+
+.installed-plugin-header {
+  display: flex;
+  min-height: 96px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 19px 21px;
+  border-bottom: 1px solid #ebe8e3;
+  background: linear-gradient(115deg, #fff, #f8f7f4);
+}
+
+.installed-plugin-header h2,
+.installed-plugin-header p,
+.market-directory-heading h2,
+.market-directory-heading p {
+  margin: 0;
+}
+
+.installed-plugin-header h2 {
+  margin-top: 6px;
+  color: #343531;
+  font: 630 18px/1.25 var(--display);
+  letter-spacing: -.025em;
+}
+
+.installed-plugin-header p {
+  margin-top: 5px;
+  color: #898a84;
+  font-size: 10.5px;
+}
+
+.installed-plugin-header > div:last-child {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 7px;
+}
+
+.installed-plugin-header > div:last-child > span {
+  padding: 5px 8px;
+  border-radius: 999px;
+  background: #efeeea;
+  color: #858680;
+  font: 9px var(--mono);
+}
+
+.installed-plugin-header .icon-button.is-loading svg {
+  animation: spin 800ms linear infinite;
+}
+
+.installed-plugin-state {
+  display: flex;
+  min-height: 112px;
+  align-items: center;
+  justify-content: center;
+  gap: 9px;
+  padding: 22px;
+  color: #858680;
+  font-size: 10.5px;
+}
+
+.installed-plugin-state .mini-spinner {
+  border-color: #d6d5d0;
+  border-top-color: #656660;
+}
+
+.installed-plugin-state.is-empty {
+  justify-content: flex-start;
+  padding-inline: 21px;
+  text-align: left;
+}
+
+.installed-plugin-state.is-empty > span {
+  display: grid;
+  width: 38px;
+  height: 38px;
+  flex: none;
+  place-items: center;
+  border-radius: 10px;
+  background: #f0efeb;
+  color: #73746e;
+}
+
+.installed-plugin-state strong,
+.installed-plugin-state small {
+  display: block;
+}
+
+.installed-plugin-state strong {
+  color: #565752;
+  font-size: 11.5px;
+}
+
+.installed-plugin-state small {
+  margin-top: 4px;
+  color: #93948e;
+  font-size: 9.5px;
+}
+
+.installed-plugin-list {
+  display: flex;
+  flex-direction: column;
+}
+
+.installed-plugin-row {
+  display: grid;
+  min-height: 74px;
+  grid-template-columns: 38px minmax(0, 1fr) auto minmax(132px, auto);
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+}
+
+.installed-plugin-row + .installed-plugin-row {
+  border-top: 1px solid #ece9e4;
+}
+
+.installed-plugin-mark {
+  display: grid;
+  width: 34px;
+  height: 34px;
+  place-items: center;
+  border-radius: 9px;
+  background: #eeede9;
+  color: #60615c;
+  font: 650 11px var(--mono);
+}
+
+.installed-plugin-copy {
+  min-width: 0;
+}
+
+.installed-plugin-copy > div {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+}
+
+.installed-plugin-copy strong {
+  overflow: hidden;
+  color: #3d3e3a;
+  font-size: 11.5px;
+  font-weight: 610;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.installed-plugin-copy code {
+  flex: none;
+  color: #999a94;
+  font-size: 8.5px;
+}
+
+.installed-plugin-copy small {
+  display: block;
+  margin-top: 5px;
+  overflow: hidden;
+  color: #8d8e88;
+  font-size: 9.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.installed-plugin-status {
+  padding: 5px 8px;
+  border-radius: 999px;
+  font-size: 9px;
+  font-weight: 580;
+  white-space: nowrap;
+}
+
+.installed-plugin-status.is-enabled {
+  background: #e8f2ed;
+  color: #467965;
+}
+
+.installed-plugin-status.is-disabled {
+  background: #efeeea;
+  color: #7d7e78;
+}
+
+.installed-plugin-status.is-incompatible {
+  background: #f7e8e5;
+  color: #a45147;
+}
+
+.installed-plugin-actions,
+.plugin-remove-confirm {
+  display: flex;
+  min-width: 132px;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.plugin-enable-action,
+.plugin-remove-confirm button {
+  min-height: 30px;
+  padding: 0 10px;
+  border: 1px solid #dcd9d3;
+  border-radius: 8px;
+  background: #faf9f7;
+  color: #5d5e59;
+  font-size: 9.5px;
+}
+
+.plugin-enable-action:hover:not(:disabled),
+.plugin-remove-confirm button:hover:not(:disabled) {
+  border-color: #c9c6c0;
+  background: #f0efeb;
+  color: #30312e;
+}
+
+.plugin-remove-confirm {
+  min-width: 224px;
+}
+
+.plugin-remove-confirm > span {
+  color: #777873;
+  font-size: 9.5px;
+  white-space: nowrap;
+}
+
+.plugin-remove-confirm button.is-danger {
+  border-color: #b85b50;
+  background: #b85b50;
+  color: #fff;
+}
+
+.plugin-remove-confirm button.is-danger:hover:not(:disabled) {
+  border-color: #a44d44;
+  background: #a44d44;
+  color: #fff;
+}
+
+.installed-plugin-error {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 10px 16px;
+  border-top: 1px solid #efd9d4;
+  background: #fbefec;
+  color: #a24f45;
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.installed-plugin-error svg {
+  flex: none;
+  margin-top: 1px;
+}
+
+.market-directory-heading {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 20px;
+  margin-bottom: 13px;
+}
+
+.market-directory-heading h2 {
+  margin-top: 5px;
+  color: #383935;
+  font: 630 18px/1.25 var(--display);
+  letter-spacing: -.025em;
+}
+
+.market-directory-heading p {
+  color: #969791;
+  font-size: 9.5px;
+}
+
+html[data-theme="dark"] .installed-plugin-section {
+  border-color: #41423e;
+  background: #272825;
+  box-shadow: none;
+}
+
+html[data-theme="dark"] .installed-plugin-header {
+  border-color: #3d3e3a;
+  background: linear-gradient(115deg, #2c2d2a, #272825);
+}
+
+html[data-theme="dark"] .installed-plugin-header h2,
+html[data-theme="dark"] .market-directory-heading h2,
+html[data-theme="dark"] .installed-plugin-copy strong,
+html[data-theme="dark"] .installed-plugin-state strong {
+  color: #deddd7;
+}
+
+html[data-theme="dark"] .installed-plugin-header > div:last-child > span,
+html[data-theme="dark"] .installed-plugin-mark,
+html[data-theme="dark"] .installed-plugin-state.is-empty > span {
+  background: #353632;
+  color: #b5b4ae;
+}
+
+html[data-theme="dark"] .installed-plugin-row + .installed-plugin-row {
+  border-color: #393a36;
+}
+
+html[data-theme="dark"] .installed-plugin-status.is-enabled {
+  background: #2e4139;
+  color: #91b9aa;
+}
+
+html[data-theme="dark"] .installed-plugin-status.is-disabled {
+  background: #363733;
+  color: #aaa9a3;
+}
+
+html[data-theme="dark"] .installed-plugin-status.is-incompatible {
+  background: #472f2d;
+  color: #df8f82;
+}
+
+html[data-theme="dark"] .plugin-enable-action,
+html[data-theme="dark"] .plugin-remove-confirm button {
+  border-color: #4a4b47;
+  background: #30312e;
+  color: #c5c4be;
+}
+
+html[data-theme="dark"] .plugin-enable-action:hover:not(:disabled),
+html[data-theme="dark"] .plugin-remove-confirm button:hover:not(:disabled) {
+  border-color: #60615c;
+  background: #3a3b37;
+  color: #ecebe5;
+}
+
+html[data-theme="dark"] .plugin-remove-confirm button.is-danger {
+  border-color: #bd665b;
+  background: #bd665b;
+  color: #fff;
+}
+
+html[data-theme="dark"] .installed-plugin-error {
+  border-color: #573a36;
+  background: #3a2927;
+  color: #df8f82;
+}
+
+@media (max-width: 800px) {
+  .installed-plugin-header,
+  .market-directory-heading {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .installed-plugin-row {
+    grid-template-columns: 38px minmax(0, 1fr) auto;
+  }
+
+  .installed-plugin-actions,
+  .plugin-remove-confirm {
+    grid-column: 2 / -1;
+    justify-content: flex-start;
+  }
+
+  .market-directory-heading p {
+    margin-top: -10px;
+  }
+}

@@ -161,7 +161,6 @@ export function SettingsView(): React.ReactElement {
   const setAgentPreset = useApp((state) => state.setAgentPreset)
   const appearance = useApp((state) => state.appearance)
   const setAppearance = useApp((state) => state.setAppearance)
-  const reconnectDsh = useApp((state) => state.reconnectDsh)
   const activeSessionId = useApp((state) => state.activeSessionId)
   const sessions = useApp((state) => state.sessions)
   const patchSession = useApp((state) => state.patchSession)
@@ -253,9 +252,8 @@ export function SettingsView(): React.ReactElement {
     if (apiKey.trim() !== '') env.DEEPSEEK_API_KEY = apiKey.trim()
     if (baseUrl.trim() !== '') env.DEEPSEEK_BASE_URL = baseUrl.trim()
     try {
-      const url = await window.desktop.settings.write(env)
+      await window.desktop.settings.write(env)
       setDesktopEnv(env)
-      reconnectDsh(url)
       setSaved(true)
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason))

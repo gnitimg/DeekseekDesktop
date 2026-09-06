@@ -57,7 +57,10 @@ export function App(): React.ReactElement {
   const removePendingApproval = useApp((state) => state.removePendingApproval)
   const clearPendingApprovals = useApp((state) => state.clearPendingApprovals)
   const connectionRevision = useApp((state) => state.connectionRevision)
+  const reconnectDsh = useApp((state) => state.reconnectDsh)
   const appearance = useApp((state) => state.appearance)
+
+  useEffect(() => window.desktop.dsh.onHostRestarted(reconnectDsh), [reconnectDsh])
 
   useEffect(() => {
     const media = window.matchMedia('(prefers-color-scheme: dark)')

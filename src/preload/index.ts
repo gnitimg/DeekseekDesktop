@@ -8,6 +8,11 @@ import { contextBridge, ipcRenderer } from 'electron'
 const api = {
   dsh: {
     getUrl: (): Promise<string | undefined> => ipcRenderer.invoke('dsh:url'),
+    onHostRestarted: (handler: (url: string) => void): (() => void) => {
+      const listener = (_event: unknown, url: string): void => handler(url)
+      ipcRenderer.on('dsh:host-restarted', listener)
+      return () => ipcRenderer.off('dsh:host-restarted', listener)
+    },
     rpc: (method: string, args: unknown): Promise<unknown> => ipcRenderer.invoke('dsh:rpc', method, args),
     stream: {
       open: (endpoint: string, args: unknown): Promise<string | undefined> => ipcRenderer.invoke('dsh:stream:open', endpoint, args),
@@ -21,7 +26,10 @@ const api = {
   },
   plugins: {
     list: (): Promise<unknown> => ipcRenderer.invoke('plugins:list'),
-    install: (spec: string): Promise<string> => ipcRenderer.invoke('plugins:install', spec),
+    installed: (): Promise<unknown> => ipcRenderer.invoke('plugins:installed'),
+    install: (spec: string): Promise<unknown> => ipcRenderer.invoke('plugins:install', spec),
+    setEnabled: (name: string, enabled: boolean): Promise<unknown> => ipcRenderer.invoke('plugins:set-enabled', name, enabled),
+    uninstall: (name: string): Promise<unknown> => ipcRenderer.invoke('plugins:uninstall', name),
   },
   settings: {
     read: (): Promise<Record<string, string>> => ipcRenderer.invoke('settings:read'),

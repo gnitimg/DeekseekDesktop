@@ -15,6 +15,23 @@ export interface PluginRepo {
   language: string | null
 }
 
+export interface InstalledPlugin {
+  name: string
+  version: string
+  description?: string
+  spec: string
+  repository?: string
+  compatible: boolean
+  enabled: boolean
+}
+
+export interface PluginMutationResult {
+  output: string
+  plugin?: InstalledPlugin
+  plugins: InstalledPlugin[]
+  dshUrl: string
+}
+
 export interface ImageAttachment {
   name: string
   mediaType: string
@@ -236,6 +253,7 @@ export type ScheduleRecord =
 export interface DesktopApi {
   dsh: {
     getUrl: () => Promise<string | undefined>
+    onHostRestarted: (handler: (url: string) => void) => () => void
     rpc: (method: string, args: unknown) => Promise<RpcResult<unknown>>
     stream: {
       open: (endpoint: string, args: unknown) => Promise<string | undefined>
@@ -245,7 +263,10 @@ export interface DesktopApi {
   }
   plugins: {
     list: () => Promise<{ items: PluginRepo[]; total_count: number }>
-    install: (spec: string) => Promise<string>
+    installed: () => Promise<InstalledPlugin[]>
+    install: (spec: string) => Promise<PluginMutationResult>
+    setEnabled: (name: string, enabled: boolean) => Promise<PluginMutationResult>
+    uninstall: (name: string) => Promise<PluginMutationResult>
   }
   settings: {
     read: () => Promise<Record<string, string>>

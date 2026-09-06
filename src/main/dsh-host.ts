@@ -7,7 +7,7 @@ import { app } from 'electron'
 import { spawn, type ChildProcess } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
-import { basename, delimiter, dirname, resolve } from 'node:path'
+import { basename, delimiter, dirname, resolve, sep } from 'node:path'
 import {
   chmodSync,
   createReadStream,
@@ -15,6 +15,7 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
+  realpathSync,
   renameSync,
   rmSync,
   statSync,
@@ -287,15 +288,160 @@ async function stopChild(child: ChildProcess): Promise<void> {
   })
 }
 
-/** Install a dsh plugin into the web profile by running `dsh plugin --profile web
- * add <spec>` in the clean dsh source tree. Resolves with combined stdout/stderr
- * on success, rejects on non-zero exit. */
-export async function installPlugin(spec: string): Promise<string> {
+interface WebProfileManifest {
+  dependencies?: Record<string, string>
+  dsh?: { profile?: { bundles?: string[], patchReload?: string } }
+}
+
+interface InstalledPackageManifest {
+  name?: string
+  version?: string
+  description?: string
+  repository?: string | { url?: string }
+  dsh?: { bundle?: { patch?: string } }
+}
+
+export interface InstalledPlugin {
+  name: string
+  version: string
+  description?: string
+  spec: string
+  repository?: string
+  compatible: boolean
+  enabled: boolean
+}
+
+export interface PluginMutation {
+  output: string
+  plugin?: InstalledPlugin
+  plugins: InstalledPlugin[]
+}
+
+const WEB_PROFILE = 'web'
+
+function webProfileDir(): string {
+  return resolve(resolveDshHome(), 'profiles', WEB_PROFILE)
+}
+
+function webProfileManifestPath(): string {
+  return resolve(webProfileDir(), 'package.json')
+}
+
+function readWebProfileManifest(): WebProfileManifest | undefined {
+  const path = webProfileManifestPath()
+  if (!existsSync(path)) return undefined
+  try {
+    return JSON.parse(readFileSync(path, 'utf8')) as WebProfileManifest
+  } catch (error) {
+    throw new Error('DSH web profile 配置无效：' + String(error))
+  }
+}
+
+function writeWebProfileManifest(manifest: WebProfileManifest): void {
+  writeFileSync(webProfileManifestPath(), JSON.stringify(manifest, undefined, 2) + '\n', 'utf8')
+}
+
+function githubRepositorySlug(value: unknown): string | undefined {
+  const candidate = typeof value === 'string'
+    ? value
+    : typeof value === 'object' && value !== null && typeof (value as { url?: unknown }).url === 'string'
+      ? (value as { url: string }).url
+      : undefined
+  if (candidate === undefined) return undefined
+  const cleaned = candidate.trim().replace(/^git\+/u, '').replace(/\.git(?:#.*)?$/u, '')
+  const shorthand = /^github:(?<slug>[^#]+)(?:#.*)?$/u.exec(cleaned)?.groups?.slug
+  if (shorthand !== undefined) return shorthand.toLowerCase()
+  const match = /github\.com[/:](?<owner>[^/#:]+)\/(?<repo>[^/#]+)$/iu.exec(cleaned)
+  return match?.groups === undefined ? undefined : (match.groups.owner + '/' + match.groups.repo).toLowerCase()
+}
+
+function installedPackageDir(profileDir: string, name: string): string {
+  return resolve(profileDir, 'node_modules', ...name.split('/'))
+}
+
+function installedPackageManifest(packageDir: string): InstalledPackageManifest | undefined {
+  const path = resolve(packageDir, 'package.json')
+  if (!existsSync(path)) return undefined
+  try {
+    return JSON.parse(readFileSync(path, 'utf8')) as InstalledPackageManifest
+  } catch {
+    return undefined
+  }
+}
+
+function hasLoadableBundlePatch(packageDir: string, patch: unknown): boolean {
+  if (typeof patch !== 'string' || patch.trim() === '' || !existsSync(packageDir)) return false
+  try {
+    const packageRoot = realpathSync(packageDir)
+    const patchPath = resolve(packageRoot, patch)
+    if (!patchPath.startsWith(packageRoot + sep)) return false
+    if (!existsSync(patchPath)) return false
+    const realPatchPath = realpathSync(patchPath)
+    return realPatchPath.startsWith(packageRoot + sep) && statSync(realPatchPath).isFile()
+  } catch {
+    return false
+  }
+}
+
+export function listInstalledPlugins(): InstalledPlugin[] {
+  const profile = readWebProfileManifest()
+  if (profile === undefined) return []
+  const profileDir = webProfileDir()
+  const enabled = new Set(profile.dsh?.profile?.bundles ?? [])
+  return Object.entries(profile.dependencies ?? {})
+    .map(([name, spec]) => {
+      const packageDir = installedPackageDir(profileDir, name)
+      const manifest = installedPackageManifest(packageDir)
+      const description = typeof manifest?.description === 'string' ? manifest.description : undefined
+      const repository = githubRepositorySlug(manifest?.repository) ?? githubRepositorySlug(spec)
+      return {
+        name,
+        version: typeof manifest?.version === 'string' ? manifest.version : spec,
+        ...(description === undefined ? {} : { description }),
+        spec,
+        ...(repository === undefined ? {} : { repository }),
+        compatible: hasLoadableBundlePatch(packageDir, manifest?.dsh?.bundle?.patch),
+        enabled: enabled.has(name),
+      }
+    })
+    .sort((left, right) => left.name.localeCompare(right.name))
+}
+
+function assertInstalledPackageName(name: string): void {
+  if (!/^(?:@[a-z0-9_.-]+\/)?[a-z0-9_.-]+$/iu.test(name)) {
+    throw new Error('无效的插件包名：' + name)
+  }
+}
+
+function setProfileBundleEnabled(name: string, enabled: boolean): void {
+  assertInstalledPackageName(name)
+  const profile = readWebProfileManifest()
+  if (profile === undefined || !Object.hasOwn(profile.dependencies ?? {}, name)) {
+    throw new Error('插件未安装：' + name)
+  }
+  const installed = listInstalledPlugins().find((plugin) => plugin.name === name)
+  if (installed?.compatible !== true) throw new Error('该包不是可加载的 DSH bundle：' + name)
+  const bundles = [...profile.dsh?.profile?.bundles ?? []]
+  const index = bundles.indexOf(name)
+  if (enabled && index < 0) bundles.push(name)
+  if (!enabled && index >= 0) bundles.splice(index, 1)
+  profile.dsh = {
+    ...profile.dsh,
+    profile: {
+      ...profile.dsh?.profile,
+      bundles,
+      patchReload: profile.dsh?.profile?.patchReload ?? 'live',
+    },
+  }
+  writeWebProfileManifest(profile)
+}
+
+async function runPluginCommand(args: readonly string[]): Promise<string> {
   const dshHome = resolveDshHome()
   mkdirSync(dshHome, { recursive: true })
   const launch = await resolveDshLaunch(dshHome)
   return await new Promise<string>((resolveP, reject) => {
-    const child = spawn(launch.command, [...launch.prefix, 'plugin', '--profile', 'web', 'add', spec], {
+    const child = spawn(launch.command, [...launch.prefix, 'plugin', '--profile', WEB_PROFILE, ...args], {
       cwd: launch.cwd,
       env: { ...process.env, PATH: ensureBundledPnpmOnPath(dshHome), DSH_HOME: dshHome },
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -307,8 +453,53 @@ export async function installPlugin(spec: string): Promise<string> {
     child.stderr?.on('data', (chunk: string) => { output += chunk })
     child.once('exit', (code) => {
       if (code === 0) resolveP(output)
-      else reject(new Error(`dsh plugin add exited with code ${String(code)}\n${output.slice(-2048)}`))
+      else reject(new Error('dsh plugin exited with code ' + String(code) + '\n' + output.slice(-2048)))
     })
-    child.once('error', (error: Error) => reject(new Error(`dsh plugin add failed: ${error.message}`)))
+    child.once('error', (error: Error) => reject(new Error('dsh plugin failed: ' + error.message)))
   })
+}
+
+/** Install a dsh plugin into the web profile by running `dsh plugin --profile web
+ * add <spec>` in the clean dsh source tree. Resolves with combined stdout/stderr
+ * on success, rejects on non-zero exit. */
+export async function installPlugin(spec: string): Promise<PluginMutation> {
+  const before = new Set(listInstalledPlugins().map((plugin) => plugin.name))
+  const output = await runPluginCommand(['add', spec])
+  const installed = listInstalledPlugins()
+  const repository = spec.toLowerCase()
+  const plugin = installed.find((item) => item.repository === repository)
+    ?? installed.find((item) => !before.has(item.name))
+  if (plugin === undefined) {
+    throw new Error('安装命令完成，但未能在 web profile 中识别插件依赖。')
+  }
+  if (!plugin.compatible) {
+    await runPluginCommand(['remove', plugin.name]).catch(() => {})
+    throw new Error('已拒绝 ' + plugin.name + '：该包没有有效的 dsh.bundle.patch 文件，不能作为 DSH 插件加载。')
+  }
+  if (!plugin.enabled) setProfileBundleEnabled(plugin.name, true)
+  const plugins = listInstalledPlugins()
+  return {
+    output,
+    plugin: plugins.find((item) => item.name === plugin.name),
+    plugins,
+  }
+}
+
+export async function setPluginEnabled(name: string, enabled: boolean): Promise<PluginMutation> {
+  setProfileBundleEnabled(name, enabled)
+  const plugins = listInstalledPlugins()
+  return {
+    output: enabled ? '插件已启用' : '插件已停用',
+    plugin: plugins.find((plugin) => plugin.name === name),
+    plugins,
+  }
+}
+
+export async function uninstallPlugin(name: string): Promise<PluginMutation> {
+  assertInstalledPackageName(name)
+  if (!listInstalledPlugins().some((plugin) => plugin.name === name)) {
+    throw new Error('插件未安装：' + name)
+  }
+  const output = await runPluginCommand(['remove', name])
+  return { output, plugins: listInstalledPlugins() }
 }
