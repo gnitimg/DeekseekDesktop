@@ -100,25 +100,58 @@ function timeLabel(value: string | number): string {
   return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleTimeString('zh-CN', { hour12: false })
 }
 
+function traceTypeLabel(kind: TraceKind): string {
+  if (kind === 'input') return '输入'
+  if (kind === 'model') return '模型'
+  return '工具'
+}
+
+function activityPreview(block: TraceBlock): string {
+  if (block.kind !== 'tool' && block.label !== '') return clipped(block.label, 180)
+  return clipped(block.detail, 180)
+}
+
 export function TrajectoryStrip({ blocks }: { blocks: TraceBlock[] }): React.ReactElement {
   const [selected, setSelected] = useState<TraceBlock | undefined>()
+  const [activityOpen, setActivityOpen] = useState(false)
   const rootRef = useRef<HTMLDivElement>(null)
+  const scrollRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
-    if (selected === undefined) return
+    if (!activityOpen) return
     const dismiss = (event: PointerEvent): void => {
-      if (rootRef.current?.contains(event.target as Node) !== true) setSelected(undefined)
+      if (rootRef.current?.contains(event.target as Node) !== true) {
+        setActivityOpen(false)
+        setSelected(undefined)
+      }
+    }
+    const dismissWithKeyboard = (event: KeyboardEvent): void => {
+      if (event.key !== 'Escape') return
+      setActivityOpen(false)
+      setSelected(undefined)
     }
     document.addEventListener('pointerdown', dismiss)
-    return () => document.removeEventListener('pointerdown', dismiss)
-  }, [selected])
+    window.addEventListener('keydown', dismissWithKeyboard)
+    return () => {
+      document.removeEventListener('pointerdown', dismiss)
+      window.removeEventListener('keydown', dismissWithKeyboard)
+    }
+  }, [activityOpen])
 
   useEffect(() => {
     if (selected !== undefined && !blocks.some((block) => block.id === selected.id)) setSelected(undefined)
   }, [blocks, selected])
 
+  useEffect(() => {
+    if (!activityOpen) return
+    requestAnimationFrame(() => {
+      const scroll = scrollRef.current
+      if (scroll !== null) scroll.scrollTop = scroll.scrollHeight
+    })
+  }, [activityOpen])
+
   return (
-    <div className={`trajectory-strip ${selected === undefined ? '' : 'is-expanded'}`} ref={rootRef}>
+    <div className={`trajectory-strip ${activityOpen ? 'is-expanded' : ''}`} ref={rootRef}>
       <div className="trajectory-label">
         <Icon name="activity" size={13} />
         <span>轨迹</span>
@@ -129,25 +162,65 @@ export function TrajectoryStrip({ blocks }: { blocks: TraceBlock[] }): React.Rea
             aria-label={`查看 ${block.label} 事件`}
             className={`trace-block trace-${block.kind} ${selected?.id === block.id ? 'is-selected' : ''}`}
             key={block.id}
-            onClick={() => setSelected((current) => current?.id === block.id ? undefined : block)}
+            onClick={() => {
+              setActivityOpen(true)
+              setSelected((current) => current?.id === block.id ? undefined : block)
+            }}
             title={block.label}
             type="button"
           />
         ))}
       </div>
-      {blocks.length > 0 && <span className="trajectory-count">{blocks.length} 项</span>}
-      {selected !== undefined && (
-        <div className="trajectory-popover">
-          <div className="trajectory-popover-head">
-            <span className={`trace-type trace-${selected.kind}`}>{selected.kind === 'input' ? 'INPUT' : selected.kind === 'model' ? 'MODEL' : 'TOOL'}</span>
-            <div><strong>{selected.label}</strong><small>{selected.eventType}</small></div>
-            <button aria-label="关闭轨迹详情" onClick={() => setSelected(undefined)} type="button"><Icon name="close" size={15} /></button>
+      {blocks.length > 0 && (
+        <button
+          aria-expanded={activityOpen}
+          aria-haspopup="dialog"
+          className={`trajectory-count ${activityOpen ? 'is-open' : ''}`}
+          onClick={() => {
+            setActivityOpen((current) => {
+              if (current) setSelected(undefined)
+              return !current
+            })
+          }}
+          type="button"
+        >
+          <span className="trajectory-count-value">{blocks.length} 项</span>
+          <span className="trajectory-count-action">{activityOpen ? '收起详情' : '展开详情'}</span>
+        </button>
+      )}
+      {activityOpen && (
+        <div aria-label="活动详情" className="trajectory-activity-panel" role="dialog">
+          <div className="trajectory-activity-head">
+            <div>
+              <strong>活动详情</strong>
+              <small>{blocks.length} 条会话事件</small>
+            </div>
+            <div className="trajectory-legend" aria-label="事件类型">
+              <span><i className="trace-input" />输入</span>
+              <span><i className="trace-model" />模型</span>
+              <span><i className="trace-tool" />工具</span>
+            </div>
+            <button aria-label="关闭活动详情" onClick={() => { setActivityOpen(false); setSelected(undefined) }} type="button"><Icon name="close" size={14} /></button>
           </div>
-          <div className="trajectory-meta">
-            <span>SEQ <b>{selected.seq}</b></span>
-            <span>TIME <b>{timeLabel(selected.time)}</b></span>
+          <div className="trajectory-activity-scroll" ref={scrollRef}>
+            {blocks.map((block) => (
+              <div className={`trajectory-activity-event ${selected?.id === block.id ? 'is-selected' : ''}`} key={block.id}>
+                <button aria-expanded={selected?.id === block.id} onClick={() => setSelected((current) => current?.id === block.id ? undefined : block)} type="button">
+                  <span className={`trajectory-event-type trace-${block.kind}`}>{traceTypeLabel(block.kind)}</span>
+                  <span className="trajectory-event-copy">
+                    <strong>{block.label}</strong>
+                    <small>{activityPreview(block)}</small>
+                  </span>
+                  <span className="trajectory-event-meta">
+                    <time>{timeLabel(block.time)}</time>
+                    <small>{block.eventType} · #{block.seq}</small>
+                  </span>
+                  <Icon className="trajectory-event-chevron" name="chevron-down" size={12} />
+                </button>
+                {selected?.id === block.id && <pre>{block.detail}</pre>}
+              </div>
+            ))}
           </div>
-          <pre>{selected.detail}</pre>
         </div>
       )}
     </div>

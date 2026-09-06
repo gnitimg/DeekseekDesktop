@@ -6,11 +6,12 @@ import type {
   SessionRenameRequest, SessionRenameValue, StreamFrameEvent, WorkspaceArchiveSessionRequest,
   WorkspaceArchiveValue, WorkspaceCreateRequest, WorkspaceCreateValue, WorkspaceDeleteRequest,
   WorkspaceDeleteValue, WorkspaceInsertBeforeRequest, WorkspaceOrderValue, WorkspaceRenameRequest,
-  WorkspaceValue,
+  WorkspaceValue, CommandExecutionValue, RemoteEventDownlinkFrame, RemoteEventResult,
 } from './types'
 
 type FrameHandler = (frame: SessionFollowFrame) => void
 type ControlHandler = (frame: SessionControlFrame) => void
+type RemoteEventHandler = (frame: RemoteEventDownlinkFrame) => void
 interface StreamRegistration {
   item: (value: unknown) => void
   error?: (error: { code: string, message: string }) => void
@@ -79,7 +80,7 @@ export const dsh = {
     rpc<SessionPromptValue>('session/prompt', { request }),
   cancel: (request: SessionCancelRequest): Promise<SessionCancelValue> =>
     rpc<SessionCancelValue>('session/cancel', { request }),
-  modelCatalog: (): Promise<ModelCatalog> => rpc<ModelCatalog>('session/modelCatalog', { _request: {} }),
+  modelCatalog: (): Promise<ModelCatalog> => rpc<ModelCatalog>('session/modelCatalog', {}),
   selectModel: (request: SessionSelectModelRequest): Promise<SessionSelectModelValue> =>
     rpc<SessionSelectModelValue>('session/selectModel', { request }),
   renameSession: (request: SessionRenameRequest): Promise<SessionRenameValue> =>
@@ -94,6 +95,12 @@ export const dsh = {
     rpc<WorkspaceOrderValue>('workspace/insertBefore', { request }),
   archiveSession: (request: WorkspaceArchiveSessionRequest): Promise<WorkspaceArchiveValue> =>
     rpc<WorkspaceArchiveValue>('workspace/archiveSession', { request }),
+  updateDeepSeekModels: (models: unknown[]): Promise<unknown> =>
+    rpc<unknown>('settings/update', { ns: 'llm-deepseek', patch: { models }, expectedRevision: undefined }),
+  executeCommand: (sessionId: string, line: string): Promise<CommandExecutionValue | undefined> =>
+    rpc<CommandExecutionValue | undefined>('commands/execute', { agentId: sessionId, line, images: [] }),
+  answerEvent: (result: RemoteEventResult): Promise<unknown> =>
+    rpc<unknown>('$events/result', result),
 
   /** Open a session/follow stream. Returns a cancel function. */
   follow: async (sessionId: string, handler: FrameHandler): Promise<() => void> => {
@@ -106,4 +113,6 @@ export const dsh = {
   },
   control: async (handler: ControlHandler, onError: (message: string) => void): Promise<() => void> =>
     await openRemoteStream<SessionControlFrame>('session/control', {}, handler, (error) => onError(`${error.code}: ${error.message}`)),
+  events: async (handler: RemoteEventHandler, onError: (message: string) => void): Promise<() => void> =>
+    await openRemoteStream<RemoteEventDownlinkFrame>('$events', {}, handler, (error) => onError(`${error.code}: ${error.message}`)),
 }

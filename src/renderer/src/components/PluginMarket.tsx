@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import type { PluginRepo } from '../types'
+import type { InstalledPlugin, PluginMutationResult, PluginRepo } from '../types'
 import { Icon } from './Icon'
 
 type Status = 'loading' | 'ready' | 'error'
 type InstallState = 'idle' | 'installing' | 'installed' | 'failed'
 type SortMode = 'stars' | 'name'
+type PluginAction = 'enabling' | 'disabling' | 'removing'
 
 interface MarketOption {
   value: string
@@ -21,6 +22,14 @@ interface MarketSelectProps {
 
 function compactNumber(value: number): string {
   return new Intl.NumberFormat('zh-CN', { notation: 'compact', maximumFractionDigits: 1 }).format(value)
+}
+
+function matchingInstalledPlugin(plugin: PluginRepo, installed: readonly InstalledPlugin[]): InstalledPlugin | undefined {
+  const repository = plugin.full_name.toLowerCase()
+  const repositoryName = plugin.name.toLowerCase()
+  return installed.find((item) => item.repository === repository)
+    ?? installed.find((item) => item.name.toLowerCase() === repositoryName)
+    ?? installed.find((item) => item.spec.toLowerCase().includes(repository))
 }
 
 function MarketSelect({ ariaLabel, icon, onChange, options, value }: MarketSelectProps): React.ReactElement {
@@ -86,13 +95,18 @@ export function PluginMarket(): React.ReactElement {
   const [total, setTotal] = useState(0)
   const [status, setStatus] = useState<Status>('loading')
   const [error, setError] = useState('')
+  const [installedPlugins, setInstalledPlugins] = useState<InstalledPlugin[]>([])
+  const [installedStatus, setInstalledStatus] = useState<Status>('loading')
+  const [installedError, setInstalledError] = useState('')
+  const [pluginAction, setPluginAction] = useState<{ name: string; action: PluginAction } | undefined>()
+  const [pendingRemoval, setPendingRemoval] = useState<string | undefined>()
   const [query, setQuery] = useState('')
   const [sortMode, setSortMode] = useState<SortMode>('stars')
   const [topic, setTopic] = useState('all')
   const [installStates, setInstallStates] = useState<Map<number, InstallState>>(new Map())
   const [installMessage, setInstallMessage] = useState<Map<number, string>>(new Map())
 
-  const load = (): void => {
+  const loadMarket = (): void => {
     setStatus('loading')
     setError('')
     void window.desktop.plugins
@@ -108,18 +122,77 @@ export function PluginMarket(): React.ReactElement {
       })
   }
 
+  const loadInstalled = (): void => {
+    setInstalledStatus('loading')
+    setInstalledError('')
+    void window.desktop.plugins
+      .installed()
+      .then((items) => {
+        setInstalledPlugins(items)
+        setInstalledStatus('ready')
+      })
+      .catch((reason: unknown) => {
+        setInstalledError(reason instanceof Error ? reason.message : String(reason))
+        setInstalledStatus('error')
+      })
+  }
+
+  const load = (): void => {
+    loadMarket()
+    loadInstalled()
+  }
+
   useEffect(load, [])
+
+  function synchronizeMutation(result: PluginMutationResult): void {
+    setInstalledPlugins(result.plugins)
+    setInstalledStatus('ready')
+  }
 
   async function install(plugin: PluginRepo): Promise<void> {
     setInstallStates((previous) => new Map(previous).set(plugin.id, 'installing'))
     setInstallMessage((previous) => new Map(previous).set(plugin.id, ''))
+    setInstalledError('')
     try {
-      const output = await window.desktop.plugins.install(plugin.full_name)
+      const result = await window.desktop.plugins.install(plugin.full_name)
+      synchronizeMutation(result)
       setInstallStates((previous) => new Map(previous).set(plugin.id, 'installed'))
-      setInstallMessage((previous) => new Map(previous).set(plugin.id, output.trim().slice(-200)))
+      setInstallMessage((previous) => new Map(previous).set(plugin.id, '已安装并重新加载 DSH，新的能力现在可以使用。'))
     } catch (reason) {
       setInstallStates((previous) => new Map(previous).set(plugin.id, 'failed'))
       setInstallMessage((previous) => new Map(previous).set(plugin.id, reason instanceof Error ? reason.message : String(reason)))
+    }
+  }
+
+  async function changeEnabled(plugin: InstalledPlugin): Promise<void> {
+    const enabled = !plugin.enabled
+    setPluginAction({ name: plugin.name, action: enabled ? 'enabling' : 'disabling' })
+    setInstalledError('')
+    try {
+      synchronizeMutation(await window.desktop.plugins.setEnabled(plugin.name, enabled))
+    } catch (reason) {
+      setInstalledError(reason instanceof Error ? reason.message : String(reason))
+    } finally {
+      setPluginAction(undefined)
+    }
+  }
+
+  async function removeInstalled(plugin: InstalledPlugin): Promise<void> {
+    setPluginAction({ name: plugin.name, action: 'removing' })
+    setInstalledError('')
+    try {
+      synchronizeMutation(await window.desktop.plugins.uninstall(plugin.name))
+      setPendingRemoval(undefined)
+      setInstallStates((previous) => {
+        const next = new Map(previous)
+        const marketPlugin = plugins.find((item) => matchingInstalledPlugin(item, [plugin]) !== undefined)
+        if (marketPlugin !== undefined) next.delete(marketPlugin.id)
+        return next
+      })
+    } catch (reason) {
+      setInstalledError(reason instanceof Error ? reason.message : String(reason))
+    } finally {
+      setPluginAction(undefined)
     }
   }
 
@@ -152,6 +225,8 @@ export function PluginMarket(): React.ReactElement {
       : left.name.localeCompare(right.name))
   }, [plugins, query, sortMode, topic])
 
+  const installationInProgress = [...installStates.values()].some((state) => state === 'installing')
+
   return (
     <div className="surface-view plugin-view">
       <header className="surface-header titlebar-drag">
@@ -166,6 +241,64 @@ export function PluginMarket(): React.ReactElement {
       </header>
 
       <div className="plugin-canvas">
+        <section className="installed-plugin-section">
+          <header className="installed-plugin-header">
+            <div>
+              <span className="eyebrow">WEB PROFILE</span>
+              <h2>已安装插件</h2>
+              <p>这些插件保存在 DSH web profile 中。启停或卸载后会自动重新加载运行时。</p>
+            </div>
+            <div>
+              <span>{installedPlugins.length} 个</span>
+              <button aria-label="刷新已安装插件" className={installedStatus === 'loading' ? 'icon-button is-loading' : 'icon-button'} disabled={installedStatus === 'loading' || pluginAction !== undefined} onClick={loadInstalled} type="button"><Icon name="refresh" size={16} /></button>
+            </div>
+          </header>
+
+          {installedStatus === 'loading' && (
+            <div className="installed-plugin-state"><span className="mini-spinner" />正在读取 web profile…</div>
+          )}
+          {installedStatus === 'ready' && installedPlugins.length === 0 && (
+            <div className="installed-plugin-state is-empty"><span><Icon name="grid" size={18} /></span><div><strong>还没有安装插件</strong><small>从下方社区目录安装兼容的 DSH bundle。</small></div></div>
+          )}
+          {installedStatus === 'ready' && installedPlugins.length > 0 && (
+            <div className="installed-plugin-list">
+              {installedPlugins.map((plugin) => {
+                const activeAction = pluginAction?.name === plugin.name ? pluginAction.action : undefined
+                const confirmingRemoval = pendingRemoval === plugin.name
+                return (
+                  <div className="installed-plugin-row" key={plugin.name}>
+                    <span className="installed-plugin-mark">{plugin.name.replace(/^@/u, '').slice(0, 1).toUpperCase()}</span>
+                    <div className="installed-plugin-copy">
+                      <div><strong>{plugin.name}</strong><code>{plugin.version}</code></div>
+                      <small>{plugin.description ?? plugin.spec}</small>
+                    </div>
+                    <span className={plugin.compatible ? plugin.enabled ? 'installed-plugin-status is-enabled' : 'installed-plugin-status is-disabled' : 'installed-plugin-status is-incompatible'}>
+                      {!plugin.compatible ? '不兼容' : plugin.enabled ? '已启用' : '已停用'}
+                    </span>
+                    {confirmingRemoval
+                      ? <div className="plugin-remove-confirm">
+                        <span>确认卸载？</span>
+                        <button disabled={activeAction !== undefined} onClick={() => setPendingRemoval(undefined)} type="button">取消</button>
+                        <button className="is-danger" disabled={activeAction !== undefined} onClick={() => void removeInstalled(plugin)} type="button">{activeAction === 'removing' ? '卸载中…' : '卸载'}</button>
+                      </div>
+                      : <div className="installed-plugin-actions">
+                        <button className="plugin-enable-action" disabled={!plugin.compatible || pluginAction !== undefined} onClick={() => void changeEnabled(plugin)} type="button">
+                          {activeAction === 'enabling' ? '启用中…' : activeAction === 'disabling' ? '停用中…' : plugin.enabled ? '停用' : '启用'}
+                        </button>
+                        <button aria-label={'卸载 ' + plugin.name} className="icon-button subtle" disabled={pluginAction !== undefined} onClick={() => setPendingRemoval(plugin.name)} type="button"><Icon name="trash" size={15} /></button>
+                      </div>}
+                  </div>
+                )
+              })}
+            </div>
+          )}
+          {installedError !== '' && <div className="installed-plugin-error" role="alert"><Icon name="activity" size={15} /><span>{installedError}</span></div>}
+        </section>
+
+        <div className="market-directory-heading">
+          <div><span className="eyebrow">COMMUNITY DIRECTORY</span><h2>发现插件</h2></div>
+          <p>仅兼容并声明 DSH bundle 的仓库会被激活。</p>
+        </div>
         <div className="market-toolbar">
           <div className="market-search">
             <Icon name="search" size={17} />
@@ -210,6 +343,8 @@ export function PluginMarket(): React.ReactElement {
           <div className="plugin-grid">
             {filtered.map((plugin) => {
               const installState = installStates.get(plugin.id) ?? 'idle'
+              const installedPlugin = matchingInstalledPlugin(plugin, installedPlugins)
+              const effectiveInstallState: InstallState = installedPlugin === undefined ? installState : 'installed'
               const message = installMessage.get(plugin.id) ?? ''
               return (
                 <article className="plugin-card" key={plugin.id}>
@@ -226,22 +361,22 @@ export function PluginMarket(): React.ReactElement {
                     {(plugin.topics ?? []).filter((topic) => topic !== 'dsh-plugin').slice(0, 3).map((topic) => <span key={topic}>{topic}</span>)}
                   </div>
                   {message !== '' && (
-                    <div className={`install-message ${installState === 'failed' ? 'is-error' : ''}`}>
-                      {installState === 'installed' && <Icon name="check" size={13} />}
+                    <div className={`install-message ${effectiveInstallState === 'failed' ? 'is-error' : ''}`}>
+                      {effectiveInstallState === 'installed' && <Icon name="check" size={13} />}
                       <span>{message}</span>
                     </div>
                   )}
                   <div className="plugin-card-footer">
                     <span>{plugin.language ?? '多语言'}</span>
                     <button
-                      className={`install-button is-${installState}`}
-                      disabled={installState === 'installing' || installState === 'installed'}
+                      className={`install-button is-${effectiveInstallState}`}
+                      disabled={installationInProgress || pluginAction !== undefined || effectiveInstallState === 'installed'}
                       onClick={() => void install(plugin)}
                       type="button"
                     >
-                      {installState === 'installing' && <span className="mini-spinner" />}
-                      {installState === 'installed' && <Icon name="check" size={14} />}
-                      {installState === 'installing' ? '安装中' : installState === 'installed' ? '已安装' : installState === 'failed' ? '重试' : '安装'}
+                      {effectiveInstallState === 'installing' && <span className="mini-spinner" />}
+                      {effectiveInstallState === 'installed' && <Icon name="check" size={14} />}
+                      {effectiveInstallState === 'installing' ? '安装中' : installedPlugin !== undefined ? installedPlugin.enabled ? '已启用' : '已安装' : effectiveInstallState === 'failed' ? '重试' : '安装'}
                     </button>
                   </div>
                 </article>

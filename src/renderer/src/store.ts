@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import type { ModelSelection, SessionJob, SessionProjectionBaseline, View } from './types'
+import type { ModelSelection, PendingApproval, SessionJob, SessionProjectionBaseline, View } from './types'
 
 const PINNED_SESSIONS_KEY = 'deepseek-desktop.pinned-sessions.v1'
 const ARCHIVED_SESSIONS_KEY = 'deepseek-desktop.archived-sessions.v1'
@@ -79,6 +79,7 @@ interface AppState {
   projectionBaselines: Record<string, SessionProjectionBaseline>
   controlJobs: Record<string, readonly SessionJob[]>
   controlError: string | undefined
+  pendingApprovals: PendingApproval[]
   setControlBaseline: (
     projections: Readonly<Record<string, SessionProjectionBaseline>>,
     jobs: Readonly<Record<string, readonly SessionJob[]>>,
@@ -86,6 +87,9 @@ interface AppState {
   updateProjection: (sessionId: string, key: string, value: unknown, seq: number) => void
   setControlJobs: (sessionId: string, jobs: readonly SessionJob[]) => void
   setControlError: (error: string | undefined) => void
+  upsertPendingApproval: (approval: PendingApproval) => void
+  removePendingApproval: (eventId: string) => void
+  clearPendingApprovals: () => void
 }
 
 export const useApp = create<AppState>((set) => ({
@@ -171,6 +175,7 @@ export const useApp = create<AppState>((set) => ({
   projectionBaselines: {},
   controlJobs: {},
   controlError: undefined,
+  pendingApprovals: [],
   setControlBaseline: (projectionBaselines, controlJobs) => set({
     projectionBaselines: { ...projectionBaselines },
     controlJobs: { ...controlJobs },
@@ -193,4 +198,14 @@ export const useApp = create<AppState>((set) => ({
     controlJobs: { ...state.controlJobs, [sessionId]: jobs },
   })),
   setControlError: (controlError) => set({ controlError }),
+  upsertPendingApproval: (approval) => set((state) => ({
+    pendingApprovals: [
+      ...state.pendingApprovals.filter((item) => item.eventId !== approval.eventId),
+      approval,
+    ],
+  })),
+  removePendingApproval: (eventId) => set((state) => ({
+    pendingApprovals: state.pendingApprovals.filter((item) => item.eventId !== eventId),
+  })),
+  clearPendingApprovals: () => set({ pendingApprovals: [] }),
 }))

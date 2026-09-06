@@ -15,6 +15,23 @@ export interface PluginRepo {
   language: string | null
 }
 
+export interface InstalledPlugin {
+  name: string
+  version: string
+  description?: string
+  spec: string
+  repository?: string
+  compatible: boolean
+  enabled: boolean
+}
+
+export interface PluginMutationResult {
+  output: string
+  plugin?: InstalledPlugin
+  plugins: InstalledPlugin[]
+  dshUrl: string
+}
+
 export interface ImageAttachment {
   name: string
   mediaType: string
@@ -173,6 +190,48 @@ export interface SessionStatsProjection {
   decodeTokens: number
 }
 
+export interface PermissionOption {
+  value: string
+  name: string
+  description?: string
+}
+
+export interface PermissionSelectProjection {
+  options: readonly PermissionOption[]
+  currentValue: string
+}
+
+export type ApprovalDecision = 'allowed-once' | 'rejected'
+
+export interface PendingApproval {
+  eventId: string
+  clientId: string
+  sessionId: string
+  toolName: string
+  callId?: string
+  reason?: string
+}
+
+export type RemoteEventDownlinkFrame =
+  | { type: 'ready', clientId: string, host: { home: string } }
+  | { type: 'emit', event: string, args: readonly unknown[] }
+  | { type: 'waterfall', event: string, eventId: string, agentId: string, request: Readonly<Record<string, unknown>> }
+  | { type: 'cancel', eventId: string }
+
+export interface RemoteEventResult {
+  clientId: string
+  eventId: string
+  outcome:
+    | { kind: 'next' }
+    | { kind: 'result', value?: unknown }
+    | { kind: 'rejected', error: { name: string, message: string, code?: string, details?: unknown } }
+}
+
+export interface CommandExecutionValue {
+  commandId: string
+  result?: { kind: string, text?: string }
+}
+
 export interface SessionControlBaseline {
   queues: Readonly<Record<string, readonly unknown[]>>
   jobs: Readonly<Record<string, readonly SessionJob[]>>
@@ -194,6 +253,7 @@ export type ScheduleRecord =
 export interface DesktopApi {
   dsh: {
     getUrl: () => Promise<string | undefined>
+    onHostRestarted: (handler: (url: string) => void) => () => void
     rpc: (method: string, args: unknown) => Promise<RpcResult<unknown>>
     stream: {
       open: (endpoint: string, args: unknown) => Promise<string | undefined>
@@ -203,7 +263,10 @@ export interface DesktopApi {
   }
   plugins: {
     list: () => Promise<{ items: PluginRepo[]; total_count: number }>
-    install: (spec: string) => Promise<string>
+    installed: () => Promise<InstalledPlugin[]>
+    install: (spec: string) => Promise<PluginMutationResult>
+    setEnabled: (name: string, enabled: boolean) => Promise<PluginMutationResult>
+    uninstall: (name: string) => Promise<PluginMutationResult>
   }
   settings: {
     read: () => Promise<Record<string, string>>
@@ -216,6 +279,7 @@ export interface DesktopApi {
     openTerminal: (path: string) => Promise<void>
   }
   attachments: { chooseImages: () => Promise<ImageAttachment[]> }
+  models: { fetch: (baseUrl: string, apiKey: string) => Promise<string[]> }
 }
 
 declare global {
